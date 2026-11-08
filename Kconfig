@@ -1,0 +1,76 @@
+# Application-specific configuration options.
+# The application Kconfig becomes the root; source the Zephyr tree first.
+
+source "Kconfig.zephyr"
+
+config TOTP_UF2_BENCH
+	bool "Unprotected UF2 bring-up image (test secrets only)"
+	default n
+	depends on BUILD_OUTPUT_UF2
+	help
+	  Installs the SRAM-wiping bootloader but leaves debug protection unlocked
+	  for hardware acceptance. Never provision real secrets with this option.
+
+config TOTP_SECURITY_BOOTLOADER
+	bool "Install the SRAM-wiping security bootloader before provisioning"
+	default y if BUILD_OUTPUT_UF2
+	depends on BUILD_OUTPUT_UF2
+	help
+	  Captures the compatible factory bootloader, installs the independent
+	  security bootloader using MBR COPY_BL, and persistently locks SWD.
+	  TOTP_UF2_BENCH explicitly disables locking during bench acceptance.
+
+config TOTP_POWER_DIAGNOSTIC
+	bool "Quiet idle followed by System OFF (power isolation only)"
+	default n
+	depends on TOTP_UF2_BENCH
+	select POWEROFF
+	help
+	  After the bootloader verification gate, leave the LED off and sleep
+	  for 60 seconds without starting Bluetooth, USB configuration, battery
+	  sampling, or button handling, then enter System OFF. No secrets can be
+	  provisioned. Reset wakes the board; factory recovery remains available.
+
+config TOTP_USB_PID
+	hex "USB product ID (default is private testing only)"
+	range 0x0001 0xffff
+	default 0x0001
+	help
+	  The default VID:PID 1209:0001 is the shared pid.codes private-test ID.
+	  It is not unique and must not be used for redistributed binaries or
+	  manufactured devices. Set an allocated PID before a public release.
+
+config TOTP_TEST_POLL
+	bool "Enable SWD button-emulation poll (debug)"
+	default y
+	help
+	  Samples the SWD-settable dbg_force_press flag so button presses can be
+	  injected via pyocd without a physical button. This adds a 20 ms periodic
+	  poll that defeats the low-power interrupt path. Disable for production.
+
+config TOTP_DEBUG
+	bool "Debug hooks: built-in test config + SWD reload"
+	default y
+	help
+	  Enables debug-only facilities: a hardcoded test config with a fixed time
+	  (load_test_config) so the device works without a USB config, the
+	  dbg_reload_config SWD hook to re-load it, and a longer connect timeout.
+	  Disable for production: the device then boots unconfigured and relies on
+	  the config.ini written over USB.
+
+config TOTP_MAX_BONDS
+	int "Maximum number of RAM-backed host profiles"
+	range 1 4
+	default 4
+	help
+	  Sets the number of BLE bonds for which the application reserves a
+	  RAM-only secret profile. This must match BT_MAX_PAIRED. Values below four
+	  are intended for capacity-limit testing; normal builds use four.
+
+config TOTP_BATTERY_MONITOR
+	bool "Battery voltage monitoring (SAADC VDDH/5)"
+	default y
+	help
+	  Samples the battery voltage via the SAADC internal VDDH/5 input (VDDH is
+	  the battery rail on this board) and reports it in the config dump. Used to
+	  slow code typing when the battery is low as a charge reminder.

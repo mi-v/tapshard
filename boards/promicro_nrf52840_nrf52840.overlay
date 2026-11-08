@@ -1,0 +1,84 @@
+/*
+ * TOTP BLE-HID token — board overlay for promicro_nrf52840
+ *
+ * The user button is wired between two adjacent GPIOs (no GND at that spot):
+ *   - btn_sense : input with internal pull-up (reads LOW when pressed)
+ *   - btn_vgnd  : output driven LOW ("virtual ground")
+ *
+ * Button wiring: P0.10 sense input and P1.11 virtual ground.
+ */
+
+/ {
+	buttons {
+		compatible = "gpio-keys";
+		btn0: btn_0 {
+			gpios = <&gpio0 10 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "User button";
+		};
+	};
+
+	virtual_gnd {
+		compatible = "gpio-leds";
+		btn_vgnd: btn_vgnd_pin {
+			gpios = <&gpio1 11 GPIO_ACTIVE_LOW>;
+			label = "Button virtual ground";
+		};
+	};
+
+	chosen {
+		/* Console over UART0 instead of the disabled CDC-ACM. */
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+	};
+
+	/* RAM disk backing the USB Mass Storage config volume (volatile). */
+	ramdisk0 {
+		compatible = "zephyr,ram-disk";
+		disk-name = "RAM";
+		sector-size = <512>;
+		sector-count = <128>;
+	};
+
+	/* Battery voltage via the SAADC internal VDDH/5 input. On this board
+	 * VDDH is the battery rail, so VDDH/5 gives the battery voltage (÷5);
+	 * it rises toward 5 V while USB is plugged. */
+	zephyr,user {
+		io-channels = <&adc 0>;
+	};
+};
+
+&adc {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1_2";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_VDDHDIV5>;
+		zephyr,resolution = <14>;
+	};
+};
+
+/* Button edges must use GPIO SENSE/PORT, not a GPIOTE IN channel which keeps
+ * the high-frequency peripheral clock running while the device is idle. */
+&gpio0 {
+	sense-edge-mask = <0x00000400>; /* P0.10: btn0 sense input. */
+
+	/* P0.13 controls only the external VCC regulator, not the MCU supply.
+	 * Its board pull-up otherwise leaves the unused regulator enabled.
+	 * Configure it before main(), including diagnostic/System OFF builds.
+	 */
+	extvcc_off: extvcc-off {
+		gpio-hog;
+		gpios = <13 GPIO_ACTIVE_HIGH>;
+		output-low;
+		line-name = "External VCC regulator off";
+	};
+};
+
+/* Board defaults to a CDC-ACM serial function on the USB device; disable it. */
+&board_cdc_acm_uart {
+	status = "disabled";
+};

@@ -1,0 +1,141 @@
+# TapShard configuration example.
+#
+# Copy this file to "config.ini" on the token's USB mass-storage volume.
+# Lines starting with '#' or ';' are comments. Keys are case-insensitive.
+# Blank lines and surrounding whitespace are ignored.
+#
+# All settings are optional and fall back to sensible defaults.
+
+# ---------------------------------------------------------------------------
+# Device-wide settings (all optional).
+# ---------------------------------------------------------------------------
+[device]
+
+# UTC offset of the machine that writes this file, in "UTC+N" notation.
+# The token anchors its clock to fresh file modification times on its USB drive
+# and applies this offset to get UTC for TOTP.
+#
+# The tested Linux setup uses UTC FAT times, so leave this at 0 there.
+# macOS behavior has not been validated. Windows writes local time; set this
+# to its UTC offset (e.g. +7, -5, +3:30; accepted range: -24..+24). (default: 0)
+timezone = 0
+
+# With two or more bonded hosts, the device emits a session-bound list like:
+# bond_snapshot = 7c19e2a4d6314f08  # taken at 2026.09.12 07:28 local
+# edit_bonds = false
+# keep_bond = bond_1  # 01:23:45:67:89:AB; accounts: Work, AWS
+# keep_bond = bond_2  # 10:32:54:76:98:BA; accounts: Personal
+# host_id = bond_1
+#
+# bond_N names are valid only with the snapshot that emitted them. host_id
+# selects the profile receiving these accounts. To forget hosts, delete their
+# keep_bond lines and change edit_bonds to true. Deleting every line forgets
+# every host in that snapshot; a host paired afterward is not affected.
+# If host_id refers to a host being forgotten, its account edits are ignored
+# while the shared [device] settings still apply.
+#
+# With zero or one bond these keys are omitted: accounts apply to the limbo or
+# sole profile. A real device reset clears every bond as well as RAM secrets.
+# Changing host_id requires replacing every keep:N with an explicit Base32
+# secret; placeholders may never copy secrets between host profiles.
+
+# How long to wait after the host subscribes before considering the HID link
+# "ready" to type. A value with no unit is milliseconds; "ms" and "s" suffixes
+# are also accepted. Accepted range: 0..60000ms. (default: 200ms)
+conn_settle_time = 200ms
+
+# Delay between each key press/release while typing. Accepted range:
+# 1..5000ms. (default: 60ms)
+inter_key_time = 60ms
+
+# LFCLK drift calibration in parts-per-million (signed). Normally measured
+# automatically across recent USB visits when a new correction improves on the
+# current value throughout a conservative +/-4-second elapsed-time uncertainty
+# interval.
+# There is no fixed waiting period. Set this only to seed a known crystal error
+# or reset a bad calibration; editing it starts a new measurement window.
+# The next successful auto-calibration overwrites it. Accepted range: -500..+500.
+# (default: 0)
+drift_ppm = 0
+
+# How long the button must be held to enter pairing mode. Accepted range:
+# 250..60000ms. (default: 3000ms)
+long_press_ms = 3000
+
+# Window in which consecutive clicks are counted as one multi-click gesture;
+# the click count selects the account. Accepted range: 50..5000ms.
+# (default: 500ms)
+click_window_ms = 500
+
+# How long to stay connected after typing before disconnecting to sleep.
+# Accepted range: 0..300000ms. (default: 2000ms)
+grace_ms = 2000
+
+# Battery voltage (mV) below which the device considers the battery low and
+# gradually increases typing delays from 2x to 5x across each code as a charge
+# reminder, while USB is unplugged. The default assumes a LiPo cell
+# (~3.5V is "charge soon"); for two AA cells (~3.0V nominal) set a lower value,
+# e.g. 2200. The measured voltage is shown in the dump header as "# battery".
+# Accepted range: 1000..5500mV. (default: 3500)
+low_battery_mv = 3500
+
+# ---------------------------------------------------------------------------
+# One or more TOTP accounts. Repeat the [account] section for each account;
+# the click count selects the account (1 click = first account, 2 = second...).
+# ---------------------------------------------------------------------------
+
+[account]
+# Optional label (purely cosmetic; default "account1", "account2", ...).
+name = github
+# Base32 secret (RFC 4648; uppercase/lowercase and '-' separators are
+# tolerated). REQUIRED — an account without a valid secret is a parse error,
+# reported by typing "000".
+#
+# Two special values are used by the device when it dumps its own config:
+#   keep:N = reuse secret N from the profile represented by this dump
+#   error  = this account's secret is broken; fix it or remove the account
+# The explicit reference lets you reorder accounts without moving secrets to
+# the wrong account. References exist only for the current dump/USB session;
+# malformed or missing references make the config invalid and report "000".
+secret = GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ
+# Number of digits in the generated code, 1-9. (default: 6)
+digits = 6
+# Time period in seconds, 1..86400. (default: 30)
+period = 30
+# Whether to press Enter after the code. (default: false — many forms submit
+# automatically once the full code is typed, so Enter is usually unnecessary)
+enter = false
+
+[account]
+name = google
+secret = GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ
+digits = 8
+period = 60
+enter = true
+
+# ---------------------------------------------------------------------------
+# Full example file:
+#
+#   [device]
+#   timezone = 0
+#   conn_settle_time = 600ms
+#   inter_key_time = 80ms
+#
+#   [account]
+#   name = github
+#   secret = JBSWY3DPEHPK3PXP
+#   digits = 6
+#   period = 30
+#
+#   [account]
+#   name = google
+#   secret = ABCDEFGHIJKLMNOP
+#   digits = 8
+#   period = 60
+#   enter = true
+#
+# Signals typed instead of a code:
+#   "0000" — no config.ini present / no accounts configured
+#   "000"  — config.ini present but failed to parse (reason in log.txt), OR
+#            the clicked slot's secret is broken (its other slots still type)
+# ---------------------------------------------------------------------------

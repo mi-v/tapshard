@@ -1,0 +1,33 @@
+# Editor artifacts
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Local environment and device configuration
+.venv/
+venv/
+/AGENTS.local.md
+/config.ini
+/log.txt
+
+# Build outputs
+build/
+build-*/
+zephyr/
+zephyr.prj.conf
+zephyr.dts
+
+# Zephyr CMake/runtime droppings
+*.d
+*.o
+__pycache__/
+*.pyc
+.cmake/
+CMakeFiles/
+CMakeCache.txt
+
+# Machine-local HIL configuration and captured results
+tools/hil/*.local.json
+tools/hil/results/
