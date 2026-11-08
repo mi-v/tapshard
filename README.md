@@ -31,6 +31,9 @@ The firmware is configured for the Zephyr `promicro_nrf52840` board target.
 Check your board's pinout and factory bootloader against the
 [compatibility requirements](docs/UF2.md#compatibility) before installing.
 
+The [enclosure 3D model and build instructions](https://www.printables.com/model/1906498-tapshard-totp-token)
+are available on Printables.
+
 | Connection | Wiring |
 |---|---|
 | Button | Between **P0.10** and **P1.11** |
