@@ -35,7 +35,7 @@ USBD_DEVICE_DEFINE(totp_usbd,
 /* String descriptors. */
 USBD_DESC_LANG_DEFINE(totp_lang);
 USBD_DESC_MANUFACTURER_DEFINE(totp_mfr, "TapShard");
-USBD_DESC_PRODUCT_DEFINE(totp_product, "TapShard");
+USBD_DESC_PRODUCT_DEFINE(totp_product, "Mass storage interface for TapShard");
 static struct usbd_desc_node totp_sn = {
 	.str = {
 		.utype = USBD_DUT_STRING_SERIAL_NUMBER,

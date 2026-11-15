@@ -168,6 +168,10 @@ Each board has a stable serial of the form
 ID. Software identifying TapShard must check this serial prefix as well as the
 shared VID/PID. Normal use relies on the operating system's mass-storage driver.
 
+USB diagnostic tools may show the shared VID owner's name, **Van Ooijen
+Technische Informatica**. The USB product string is **Mass storage interface for
+TapShard**; the configuration drive is displayed as **TapShard Config**.
+
 ## Building and contributing
 
 Set up Zephyr v4.4.2 and SDK 1.0.1 with [Building TapShard](docs/BUILDING.md),
