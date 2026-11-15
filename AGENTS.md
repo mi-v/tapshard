@@ -12,7 +12,8 @@ volume; plugging in dumps `config.ini`, and a plugged-in click or physical
 unplug applies the edited configuration. Unplug then erases and reformats the
 entire RAM disk. Secrets and per-host profiles are RAM-only.
 
-USB manufacturer: `TapShard`; USB product: `Mass storage interface for TapShard`;
+USB manufacturer: `TapShard`;
+USB product: `Mass storage configuration interface for TapShard`;
 storage vendor/model: `TapShard` / `Config`; BLE name: `TapShard TOTP token`.
 Application USB defaults to `16c0:27df` with
 serial `mivlad@gmail.com:tapshard-<16 uppercase hex digits>` from the board's
