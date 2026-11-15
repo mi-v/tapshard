@@ -101,7 +101,9 @@ after the test; do not run filesystem self-tests on a provisioned live volume.
 During a known HID-settle or TOTP-boundary wait, the ramp follows that timer;
 a restarted wait restarts progress. Unknown waits retain the initial pattern.
 Waiting ramps from 3 to 10 Hz at 50% duty; typing is 10 Hz at 50% duty.
-Pairing is distinctly slower, at 1 Hz (500 ms on/off). Steady button feedback
+Pairing is distinctly slower, at 1 Hz (500 ms off/on), starting OFF immediately
+at the long-press threshold so entry is visible from steady button feedback.
+Steady button feedback
 covers click collection; idle and completed sends leave the LED off.
 
 `dbg_led_mode` is off/button/pairing/waiting/typing = 0/1/2/3/4.

@@ -173,7 +173,8 @@ System OFF. SWD makes System OFF use debug emulation; measure without SWD.
   budget; decreasing settling must not truncate an older valid wait.
 - Waiting LED feedback ramps 3->10 Hz at 50% duty, following restarted
   settle/TOTP deadlines; unknown waits hold the initial 3 Hz pattern.
-  Pairing uses 1 Hz/50% duty and typing uses 10 Hz/50% duty.
+  Pairing uses 1 Hz/50% duty, beginning OFF so entry from held-button feedback
+  is immediately visible. Typing uses 10 Hz/50% duty.
   One spinlock-protected LED worker owns runtime
   GPIO writes; idle has no LED timer. Pairing and button feedback retain
   priority over waiting, and typing takes priority over button feedback.

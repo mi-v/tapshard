@@ -496,6 +496,13 @@ static void led_work_handler(struct k_work *work)
 		led_output = false;
 		led_edge_ms = now;
 		led_off_ms = 0;
+		if (mode == LED_PAIRING) {
+			/* Held-button feedback is already ON. Enter with a full OFF
+			 * half-cycle so the long-press threshold is visible at once. */
+			led_edge_ms = now + PAIRING_BLINK_MS;
+			dbg_led_period_ms = 2 * PAIRING_BLINK_MS;
+			dbg_led_on_ms = PAIRING_BLINK_MS;
+		}
 	}
 	if (mode == LED_OFF || mode == LED_BUTTON) {
 		led_output = mode == LED_BUTTON;
