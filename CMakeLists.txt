@@ -58,6 +58,8 @@ target_sources(app PRIVATE
 )
 
 zephyr_link_libraries(-Wl,--wrap=nrfx_power_usbevt_init)
+# Direct FatFs remounts need matched Zephyr disk-initialization references.
+zephyr_link_libraries(-Wl,--wrap=disk_initialize)
 
 if(CONFIG_TOTP_BATTERY_MONITOR)
   target_sources(app PRIVATE src/battery.c)

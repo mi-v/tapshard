@@ -158,6 +158,26 @@ System OFF. SWD makes System OFF use debug emulation; measure without SWD.
 - HID sends are serialized through `bt_gatt_notify_cb`: wait for completion,
   then apply the configured delay. Retry transient `-ENOMEM`/`-EAGAIN`; abort
   and disconnect on permanent error or completion timeout so no key stays down.
+- A restored bonded CCC can precede host HID readiness. HID metadata reads and
+  explicit notification-enable writes extend a minimum 500 ms quiet period
+  before typing, including writes that leave the restored CCC unchanged. A
+  keyboard LED output report retains the fast path. The initial subscription
+  wait also has this minimum because discovery can start after CCC restoration.
+  A pending request waiting for HID readiness times out after the configured
+  settle interval (at least 500 ms) plus 10 seconds. Arm that deadline once;
+  metadata activity must not extend it. Cancel it when readiness is established,
+  before any legitimate TOTP-boundary wait, or on disconnect/pairing/idle.
+  Stable live-config reads have their own bounded retry loop: cancel any old
+  readiness deadline and defer arming until the new settings have been applied.
+  An explicit config apply that increases settling may extend an active HID
+  budget; decreasing settling must not truncate an older valid wait.
+- Waiting LED feedback ramps 3->10 Hz at 50% duty, following restarted
+  settle/TOTP deadlines; unknown waits hold the initial 3 Hz pattern.
+  Pairing uses 1 Hz/50% duty and typing uses 10 Hz/50% duty.
+  One spinlock-protected LED worker owns runtime
+  GPIO writes; idle has no LED timer. Pairing and button feedback retain
+  priority over waiting, and typing takes priority over button feedback.
+  `dbg_led_mode` is off/button/pairing/waiting/typing = 0/1/2/3/4.
 - On low battery with USB unplugged, typing delays ramp from 2x on the first
   character to 5x on the last; Enter keeps the final cadence. Keep key holds
   at normal duration and put the extra delay after release to avoid host
@@ -168,6 +188,15 @@ System OFF. SWD makes System OFF use debug emulation; measure without SWD.
 - FatFs: `CONFIG_FS_FATFS_HAS_RTC=y` with `get_fattime()` returning **1980-01-01**
   (below `TIME_SANE_MIN`) so device-written files never become a clock anchor;
   `CONFIG_FS_FATFS_LFN=y` so `config.ini` keeps its lowercase name.
+- Forced FatFs remounts must release their Zephyr disk references. The
+  `disk_initialize` linker wrapper tracks successful RAM initializations;
+  `ram_unmount` releases only those references, including failed-mount and
+  format cleanup. Keep remounting for fresh host metadata. A leaked reference
+  per 100 ms poll exhausts the 16-bit count after roughly 109 minutes.
+  Boot tests cover repeated scans and invalid FAT cleanup. TEST_POLL bench
+  builds also stress the real count at 65533 and test refused initialization
+  at 65535; `dbg_fs_ref_stress=2` means pass with matching before/after counts.
+  Production never injects a reference count.
 - `CONFIG_FS_FATFS_NORTC` is not used; with `HAS_RTC`, `get_fattime()` is required.
 - Dumped secrets use `keep:N`, resolved against the protected profile snapshot
   that produced that USB session's dump. Do not resolve them by destination
@@ -186,6 +215,11 @@ System OFF. SWD makes System OFF use debug emulation; measure without SWD.
   disconnect until `bt_conn_cb.recycled`; starting it in the callback fails
   with `-ENOMEM`. The filtered-to-unfiltered timer has no connection object and
   restarts advertising directly.
+- A new button press cancels automatic grace disconnection while the gesture
+  is collected. If teardown has begun, retain the fresh request and wait for
+  `recycled` before advertising; a click completed in IDLE starts a new cycle
+  rather than being discarded. Track connection release through the gap
+  between `disconnected` and `recycled`.
 - Preserve a click as a raw slot request until the secured peer profile is
   selected. A fallback may connect a different host than the preferred one, so
   classifying `000`/`0000` or slot validity at button time uses stale state.

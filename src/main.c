@@ -16,9 +16,9 @@
  *
  *   - link readiness  — "can the host receive reports right now?" This is
  *     `subscribed (CCC notify) && (settle elapsed || host wrote the LED report)`.
- *     The settle happens once per connection, started on subscribe and
- *     fast-forwarded by the output (LED) report write. Typing is immediate once
- *     the link is ready — there is no per-type delay.
+ *     The settle starts on subscribe, extends while the host sets up HID,
+ *     and is fast-forwarded by an output (LED) report write. Typing is
+ *     immediate once the link is ready — there is no per-type delay.
  *
  *   - pending request — "is there a code waiting to be typed?"
  *
@@ -72,6 +72,10 @@
 #define CONNECT_TIMEOUT_S   10
 #endif
 #define PAIRING_TIMEOUT_S   30
+#define PAIRING_BLINK_MS    500
+/* Allow the configured settle interval plus bounded host setup time. Metadata
+ * activity may restart settling, but must not keep an unusable link forever. */
+#define HID_READY_TIMEOUT_MS 10000
 /* Directed advertising is not handled consistently by host background scan
  * policies. Prefer the last host with a filtered ordinary advertisement
  * before making every retained bond eligible. */
@@ -124,6 +128,7 @@ enum idle_reason {
 	IDLE_INVALID_CLOCK = 9,
 	IDLE_SEND_FAILED = 10,
 	IDLE_CONFIG_UNSTABLE = 11,
+	IDLE_HID_READY_TIMEOUT = 12,
 };
 
 static enum app_state state = STATE_IDLE;
@@ -207,8 +212,11 @@ static char last_code[16];
 volatile int dbg_reload_config;
 #endif
 
-/* Link readiness: settled (settle elapsed OR host wrote the LED report). */
+/* Restored subscriptions can precede the host's HID input device. Metadata
+ * reads and explicit subscription writes must go quiet before typing. */
+#define HID_SETUP_QUIET_MS 500
 static bool link_settled;
+static atomic_t settle_generation;
 
 /* Debug state (inspected via SWD). */
 static volatile int bt_ready_called;
@@ -229,6 +237,7 @@ static struct k_work_delayable connect_timeout_work;
 static struct k_work_delayable preferred_fallback_work;
 static struct k_work_delayable pairing_timeout_work;
 static struct k_work_delayable settle_work;
+static struct k_work_delayable hid_ready_timeout_work;
 static struct k_work_delayable grace_work;
 static struct k_work adv_work;
 static struct k_work_delayable config_poll_work;
@@ -238,6 +247,9 @@ static struct k_work_delayable pairing_disconnect_work;
 static struct k_work_delayable pairing_finish_work;
 static struct k_work_delayable totp_wait_work;
 static atomic_t adv_restart_pending;
+/* A disconnected callback still owns the sole connection object. Keep this
+ * set from local teardown until recycled, including the gap after unref. */
+static atomic_t connection_releasing;
 
 static bool usb_vbus_present;
 static bool usb_session_active;
@@ -250,6 +262,11 @@ static void try_send(void);
 static void queue_request(int slot_idx);
 static bool classify_pending(void);
 static void resolve_pending_config(void);
+static void led_refresh(void);
+static void led_wait_window(bool settle, uint32_t duration_ms);
+static void led_button_feedback(bool active);
+static void led_attempt_reset(void);
+static void led_send_finished(void);
 
 static const uint16_t appearance = CONFIG_BT_DEVICE_APPEARANCE;
 
@@ -261,6 +278,7 @@ static void set_state(enum app_state s)
 {
 	state = s;
 	dbg_state = s;
+	led_refresh();
 	printk("state -> %d\n", (int)s);
 }
 
@@ -270,15 +288,52 @@ static bool link_ready(void)
 	return kbd_is_subscribed() && link_settled;
 }
 
+static uint32_t hid_ready_budget_ms(void)
+{
+	return MAX(device_settings.settle_ms, HID_SETUP_QUIET_MS) + HID_READY_TIMEOUT_MS;
+}
+
+static void wait_for_hid(void)
+{
+	/* Live configuration has its own bounded retry loop. Wait for it to
+	 * resolve so this budget uses the newly applied settling interval. */
+	if (pending.kind == PENDING_CONFIG_READ) {
+		return;
+	}
+	/* Schedule once per readiness wait; metadata reads must not extend it.
+	 * A configured long settle remains valid, including the 60 s maximum. */
+	k_work_schedule(&hid_ready_timeout_work, K_MSEC(hid_ready_budget_ms()));
+}
+
 static bool pending_valid(void)
 {
 	return pending.kind != PENDING_NONE;
+}
+
+static void apply_device_settings(const struct totp_device *settings)
+{
+	bool settle_increased = settings->settle_ms > device_settings.settle_ms;
+
+	device_settings = *settings;
+	if (settle_increased) {
+		/* An explicit live/unplug apply may lengthen a legitimate settle.
+		 * Extend its budget if needed, without truncating an older longer
+		 * wait. Ordinary metadata never changes this deadline. */
+		if (pending_valid() && !link_ready() &&
+		    (state == STATE_CONNECTED || state == STATE_GRACE) &&
+		    k_ticks_to_ms_ceil64(k_work_delayable_remaining_get(
+					 &hid_ready_timeout_work)) < hid_ready_budget_ms()) {
+			k_work_cancel_delayable(&hid_ready_timeout_work);
+			wait_for_hid();
+		}
+	}
 }
 
 static void pending_clear(void)
 {
 	pending.kind = PENDING_NONE;
 	pending.slot_idx = -1;
+	led_refresh();
 }
 
 static void sending_clear(void)
@@ -288,13 +343,234 @@ static void sending_clear(void)
 	sending_revision = 0;
 }
 
-/* Blink the LED while in pairing mode (visual feedback); off otherwise. */
+enum led_mode {
+	LED_OFF,
+	LED_BUTTON,
+	LED_PAIRING,
+	LED_WAITING,
+	LED_TYPING,
+};
+
+struct led_window {
+	int64_t start_ms;
+	uint32_t duration_ms;
+};
+
+struct led_pulse {
+	uint32_t on_ms;
+	uint32_t off_ms;
+};
+
+/* Only led_work writes the runtime GPIO. Protect its deadline/phase snapshot
+ * against ATT RX callbacks; no sleeps or peripheral clocks are needed. */
+static struct k_spinlock led_lock;
+static bool led_live;
+static bool led_button_active;
+static struct led_window led_settle_window;
+static struct led_window led_totp_window;
+static enum led_mode led_render_mode;
+static bool led_output;
+static int64_t led_edge_ms;
+static uint32_t led_off_ms;
+
+volatile int dbg_led_mode;
+volatile int dbg_led_edges;
+volatile int dbg_led_on;
+volatile int dbg_led_period_ms;
+volatile int dbg_led_on_ms;
+volatile int dbg_led_progress;
+volatile int dbg_led_wait_restarts;
+
+static enum led_mode led_choose(enum app_state app, bool button, bool request)
+{
+	if (app == STATE_PAIRING) {
+		return LED_PAIRING;
+	}
+	if (app == STATE_SENDING) {
+		return LED_TYPING;
+	}
+	if (button) {
+		return LED_BUTTON;
+	}
+	if (request && app != STATE_IDLE) {
+		return LED_WAITING;
+	}
+	return LED_OFF;
+}
+
+static uint32_t led_progress(const struct led_window *window, int64_t now)
+{
+	if (!window->duration_ms || now <= window->start_ms) {
+		return 0;
+	}
+	return (uint32_t)(MIN((uint64_t)(now - window->start_ms),
+			     window->duration_ms) * 1000u / window->duration_ms);
+}
+
+static struct led_pulse led_wait_pulse(uint32_t progress)
+{
+	struct led_pulse pulse;
+	uint32_t period;
+	uint32_t frequency;
+
+	progress = MIN(progress, 1000u);
+	/* Frequency in millihertz: linear 3 Hz -> 10 Hz, at 50% duty. */
+	frequency = 3000u + 7u * progress;
+	period = (1000000u + frequency / 2u) / frequency;
+	pulse.on_ms = period / 2u;
+	pulse.off_ms = period - pulse.on_ms;
+	return pulse;
+}
+
+/* Call with led_lock held. Work scheduling is safe from ATT RX context. */
+static void led_refresh_locked(void)
+{
+	if (!led_live) {
+		return;
+	}
+	k_work_reschedule(&led_work, K_NO_WAIT);
+}
+
+static void led_refresh(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+
+	led_refresh_locked();
+	k_spin_unlock(&led_lock, key);
+}
+
+static void led_button_feedback(bool active)
+{
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+
+	led_button_active = active;
+	led_refresh_locked();
+	k_spin_unlock(&led_lock, key);
+}
+
+static void led_wait_window(bool settle, uint32_t duration_ms)
+{
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	struct led_window *window = settle ? &led_settle_window : &led_totp_window;
+
+	window->start_ms = k_uptime_get();
+	window->duration_ms = duration_ms;
+	if (duration_ms) {
+		dbg_led_wait_restarts++;
+	}
+	led_refresh_locked();
+	k_spin_unlock(&led_lock, key);
+}
+
+static void led_attempt_reset(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+
+	led_button_active = false;
+	led_settle_window.duration_ms = 0;
+	led_totp_window.duration_ms = 0;
+	led_refresh_locked();
+	k_spin_unlock(&led_lock, key);
+}
+
+static void led_send_finished(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+
+	led_settle_window.duration_ms = 0;
+	led_totp_window.duration_ms = 0;
+	k_spin_unlock(&led_lock, key);
+}
+
 static void led_work_handler(struct k_work *work)
 {
-	if (state == STATE_PAIRING) {
-		gpio_pin_toggle_dt(&led);
-		k_work_reschedule(&led_work, K_MSEC(200));
+	k_spinlock_key_t key = k_spin_lock(&led_lock);
+	enum led_mode mode = led_choose(state, led_button_active, pending_valid());
+	int64_t now = k_uptime_get();
+	struct led_pulse pulse;
+	bool output = led_output;
+
+	dbg_led_mode = mode;
+	if (mode != led_render_mode) {
+		led_render_mode = mode;
+		led_output = false;
+		led_edge_ms = now;
+		led_off_ms = 0;
 	}
+	if (mode == LED_OFF || mode == LED_BUTTON) {
+		led_output = mode == LED_BUTTON;
+		led_edge_ms = 0;
+		dbg_led_period_ms = 0;
+		dbg_led_on_ms = 0;
+	} else if (!led_edge_ms || now >= led_edge_ms) {
+		if (led_output && led_off_ms) {
+			led_output = false;
+			led_edge_ms = now + led_off_ms;
+		} else {
+			if (mode == LED_WAITING) {
+				const struct led_window *window = !link_settled ?
+					&led_settle_window : &led_totp_window;
+
+				dbg_led_progress = led_progress(window, now);
+				pulse = led_wait_pulse(dbg_led_progress);
+			} else {
+				pulse.on_ms = mode == LED_TYPING ? 50 : PAIRING_BLINK_MS;
+				pulse.off_ms = pulse.on_ms;
+			}
+			led_output = true;
+			led_off_ms = pulse.off_ms;
+			led_edge_ms = now + pulse.on_ms;
+			dbg_led_period_ms = pulse.on_ms + pulse.off_ms;
+			dbg_led_on_ms = pulse.on_ms;
+		}
+	}
+	if (output != led_output) {
+		gpio_pin_set_dt(&led, led_output);
+		dbg_led_edges++;
+	}
+	dbg_led_on = led_output;
+	if (led_edge_ms) {
+		k_work_reschedule(&led_work, K_MSEC(MAX(led_edge_ms - now, 1)));
+	}
+	k_spin_unlock(&led_lock, key);
+}
+
+static int led_selftest(void)
+{
+	struct led_window window = { .start_ms = 100, .duration_ms = 500 };
+	struct led_pulse pulse;
+
+	if (led_progress(&window, 99) != 0 || led_progress(&window, 350) != 500 ||
+	    led_progress(&window, 600) != 1000 || led_progress(&window, 999) != 1000) {
+		return -1;
+	}
+	/* Restarting a quiet window resets progress; an unknown wait stays at 0. */
+	window.start_ms = 350;
+	if (led_progress(&window, 350) != 0 || led_progress(&window, 600) != 500) {
+		return -1;
+	}
+	window.duration_ms = 0;
+	if (led_progress(&window, 999) != 0) {
+		return -1;
+	}
+	pulse = led_wait_pulse(0);
+	if (pulse.on_ms != 166 || pulse.off_ms != 167) {
+		return -1;
+	}
+	pulse = led_wait_pulse(1000);
+	if (pulse.on_ms != 50 || pulse.off_ms != 50) {
+		return -1;
+	}
+	if (led_choose(STATE_PAIRING, true, true) != LED_PAIRING ||
+	    led_choose(STATE_SENDING, true, true) != LED_TYPING ||
+	    led_choose(STATE_CONNECTED, true, true) != LED_BUTTON ||
+	    led_choose(STATE_CONNECTING, false, true) != LED_WAITING ||
+	    led_choose(STATE_CONNECTED, false, true) != LED_WAITING ||
+	    led_choose(STATE_GRACE, false, false) != LED_OFF ||
+	    led_choose(STATE_IDLE, false, false) != LED_OFF) {
+		return -1;
+	}
+	return 0;
 }
 
 static void advertise(bool discoverable, bool prefer_host)
@@ -377,23 +653,25 @@ static void go_idle(enum idle_reason reason)
 	kbd_cancel_send();
 	sending_clear();
 	link_settled = false;
+	atomic_inc(&settle_generation);
 	k_work_cancel_delayable(&connect_timeout_work);
 	k_work_cancel_delayable(&preferred_fallback_work);
 	k_work_cancel_delayable(&pairing_timeout_work);
 	k_work_cancel_delayable(&settle_work);
+	k_work_cancel_delayable(&hid_ready_timeout_work);
 	k_work_cancel_delayable(&grace_work);
 	k_work_cancel_delayable(&totp_wait_work);
 	k_work_cancel_delayable(&config_retry_work);
 	config_fs_stable_reset();
-	k_work_cancel_delayable(&led_work);
 	k_work_cancel_delayable(&pairing_disconnect_work);
 	k_work_cancel_delayable(&pairing_finish_work);
-	gpio_pin_set_dt(&led, 0);
+	led_attempt_reset();
 	bt_le_adv_stop();
 	preferred_advertising = false;
 	atomic_clear(&adv_restart_pending);
 	set_state(STATE_IDLE);
 	if (cur_conn) {
+		atomic_set(&connection_releasing, 1);
 		bt_conn_disconnect(cur_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 	}
 	printk("-> IDLE (sleeping)\n");
@@ -404,8 +682,7 @@ static void stop_pairing_ui(void)
 {
 	button_set_pairing(false);
 	k_work_cancel_delayable(&pairing_timeout_work);
-	k_work_cancel_delayable(&led_work);
-	gpio_pin_set_dt(&led, 0);
+	led_attempt_reset();
 }
 
 static void enter_pairing(void)
@@ -413,9 +690,11 @@ static void enter_pairing(void)
 	pending_clear();
 	kbd_cancel_send();
 	link_settled = false;
+	atomic_inc(&settle_generation);
 	k_work_cancel_delayable(&connect_timeout_work);
 	k_work_cancel_delayable(&preferred_fallback_work);
 	k_work_cancel_delayable(&settle_work);
+	k_work_cancel_delayable(&hid_ready_timeout_work);
 	k_work_cancel_delayable(&grace_work);
 	k_work_cancel_delayable(&totp_wait_work);
 	k_work_cancel_delayable(&config_retry_work);
@@ -424,16 +703,19 @@ static void enter_pairing(void)
 	k_work_cancel_delayable(&pairing_finish_work);
 	atomic_clear(&adv_restart_pending);
 	button_set_pairing(true);
+	led_attempt_reset();
 	set_state(STATE_PAIRING);
 	k_work_reschedule(&pairing_timeout_work, K_SECONDS(PAIRING_TIMEOUT_S));
-	k_work_reschedule(&led_work, K_MSEC(200));
 
 	/* Existing bonds remain valid. If one snatches this discoverable
 	 * advertisement it is disconnected below and pairing resumes. */
 	if (cur_conn) {
 		bt_conn_disconnect(cur_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 	} else {
-		advertise(true, false);
+		atomic_set(&adv_restart_pending, 1);
+		if (!atomic_get(&connection_releasing)) {
+			k_work_submit(&adv_work);
+		}
 	}
 	printk("Pairing mode entered\n");
 }
@@ -517,6 +799,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 	if (state == STATE_CONNECTING) {
 		set_state(STATE_CONNECTED);
+		if (pending_valid()) {
+			wait_for_hid();
+		}
 	}
 
 	/* Do not send a Security Request here: BlueZ's HID profile (hog) already
@@ -529,6 +814,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	dbg_disconnect_reason = reason;
 	printk("Disconnected (reason 0x%02x)\n", reason);
 
+	atomic_set(&connection_releasing, 1);
 	if (cur_conn) {
 		bt_conn_unref(cur_conn);
 		cur_conn = NULL;
@@ -536,12 +822,17 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	/* The link is gone: any readiness is void. */
 	link_settled = false;
+	atomic_inc(&settle_generation);
 	k_work_cancel_delayable(&settle_work);
+	k_work_cancel_delayable(&hid_ready_timeout_work);
 
 	if (state == STATE_PAIRING) {
 		/* The callback still owns a connection object. Keep pairing, but
 		 * defer discoverable advertising until the object is recycled. */
 		atomic_set(&adv_restart_pending, 1);
+	} else if (state == STATE_CONNECTING && atomic_get(&adv_restart_pending)) {
+		/* A fresh press arrived during the previous cycle's teardown. Keep
+		 * its request and timeout; recycled will start its advertisement. */
 	} else if (state != STATE_IDLE) {
 		go_idle(IDLE_DISCONNECTED);
 	}
@@ -549,14 +840,17 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 static void adv_work_handler(struct k_work *work)
 {
-	if (state == STATE_PAIRING || state == STATE_CONNECTING) {
-		advertise(state == STATE_PAIRING, false);
+	if (!atomic_get(&connection_releasing) && !cur_conn &&
+	    (state == STATE_PAIRING || state == STATE_CONNECTING)) {
+		atomic_clear(&adv_restart_pending);
+		advertise(state == STATE_PAIRING, state == STATE_CONNECTING);
 	}
 }
 
 static void recycled(void)
 {
-	if (atomic_cas(&adv_restart_pending, 1, 0)) {
+	atomic_clear(&connection_releasing);
+	if (atomic_get(&adv_restart_pending)) {
 		k_work_submit(&adv_work);
 	}
 }
@@ -1216,7 +1510,7 @@ static int config_sync(bool require_stable)
 		time_set_drift(cfg.device.drift_ppm);
 	}
 
-	device_settings = cfg.device;
+	apply_device_settings(&cfg.device);
 	if (!delete_target) {
 		profiles_clear_contents(target);
 		memcpy(target->slots, cfg.slots, sizeof(cfg.slots));
@@ -1447,6 +1741,7 @@ static void queue_request(int slot_idx)
 {
 	pending.kind = PENDING_SLOT;
 	pending.slot_idx = slot_idx;
+	led_refresh();
 }
 
 /* Resolve a raw slot request against the profile belonging to the connected
@@ -1562,6 +1857,7 @@ static void send_complete(int err)
 	}
 	sending_clear();
 
+	led_send_finished();
 	set_state(STATE_GRACE);
 	k_work_reschedule(&grace_work, K_MSEC(device_settings.grace_ms));
 	printk("-> GRACE\n");
@@ -1628,12 +1924,17 @@ static void try_send(void)
 {
 	uint32_t wait_ms;
 
-	if (!pending_valid() || !link_ready()) {
+	if (!pending_valid() ||
+	    (state != STATE_CONNECTED && state != STATE_GRACE)) {
 		return;
 	}
-	if (state != STATE_CONNECTED && state != STATE_GRACE) {
+	if (!link_ready()) {
+		wait_for_hid();
 		return;
 	}
+	/* Readiness is established. Legitimate config/TOTP-boundary waits have
+	 * their own deadlines and must not be cut short by host setup timeout. */
+	k_work_cancel_delayable(&hid_ready_timeout_work);
 	if (pending.kind == PENDING_CONFIG_READ) {
 		return;
 	}
@@ -1662,6 +1963,7 @@ static void try_send(void)
 			set_state(STATE_CONNECTED);
 		}
 		k_work_reschedule(&totp_wait_work, K_MSEC(wait_ms));
+		led_wait_window(false, wait_ms);
 		return;
 	}
 
@@ -1675,6 +1977,7 @@ static void try_send(void)
 
 static void totp_wait_handler(struct k_work *work)
 {
+	led_wait_window(false, 0);
 	if (pending.kind == PENDING_SLOT && !time_is_valid()) {
 		go_idle(IDLE_INVALID_CLOCK);
 		return;
@@ -1690,10 +1993,30 @@ static void grace_work_handler(struct k_work *work)
 	}
 }
 
+static void hid_ready_timeout_handler(struct k_work *work)
+{
+	if ((state == STATE_CONNECTED || state == STATE_GRACE) &&
+	    pending_valid() && pending.kind != PENDING_CONFIG_READ && !link_ready()) {
+		printk("HID readiness timeout; click to retry\n");
+		go_idle(IDLE_HID_READY_TIMEOUT);
+	}
+}
+
 /* Link became "ready" (settle elapsed, or fast-forwarded by the LED write). */
 static void settle_work_handler(struct k_work *work)
 {
+	atomic_val_t generation = atomic_get(&settle_generation);
+
+	/* ATT RX can reschedule this work after it has already been dequeued. */
+	if (k_work_delayable_remaining_get(&settle_work) > 0) {
+		return;
+	}
 	link_settled = true;
+	if (atomic_get(&settle_generation) != generation) {
+		link_settled = false;
+		return;
+	}
+	led_wait_window(true, 0);
 	try_send();
 }
 
@@ -1702,14 +2025,97 @@ static void settle_work_handler(struct k_work *work)
  * report write fast-forwards it). */
 static void on_subscribed(void)
 {
-	k_work_reschedule(&settle_work, K_MSEC(device_settings.settle_ms));
+	atomic_inc(&settle_generation);
+	link_settled = false;
+	/* Discovery can begin after the bonded CCC has already been restored. */
+	k_work_reschedule(&settle_work,
+		K_MSEC(MAX(device_settings.settle_ms, HID_SETUP_QUIET_MS)));
+	led_wait_window(true, MAX(device_settings.settle_ms, HID_SETUP_QUIET_MS));
+}
+
+/* A bonded CCC may be restored before the host installs its notification
+ * handler. Extend the settle window while it reads HID metadata or explicitly
+ * enables notifications, including a write of the already-restored value. */
+static void on_host_setup(void)
+{
+	if (!cur_conn || (state != STATE_CONNECTED && state != STATE_GRACE)) {
+		return;
+	}
+	atomic_inc(&settle_generation);
+	link_settled = false;
+	k_work_reschedule(&settle_work,
+		K_MSEC(MAX(device_settings.settle_ms, HID_SETUP_QUIET_MS)));
+	led_wait_window(true, MAX(device_settings.settle_ms, HID_SETUP_QUIET_MS));
 }
 
 /* Called (ATT RX context) when the host writes the output (LED) report: the
  * host's HID stack is up, so skip the rest of the settle. */
 static void on_output_write(void)
 {
+	atomic_inc(&settle_generation);
+	link_settled = false;
 	k_work_reschedule(&settle_work, K_NO_WAIT);
+	led_wait_window(true, 0);
+}
+
+static int hid_ready_selftest(void)
+{
+	struct pending_req saved_pending = pending;
+	struct totp_device saved_settings = device_settings;
+	struct totp_device settings = device_settings;
+	enum app_state saved_state = state;
+	k_ticks_t deadline;
+	int result = -1;
+
+	state = STATE_CONNECTED;
+	/* A connection during the stable-config polls must not freeze a budget
+	 * from the old settings before a newly configured 60 s settle applies. */
+	pending.kind = PENDING_CONFIG_READ;
+	device_settings.settle_ms = 500;
+	wait_for_hid();
+	if (k_work_delayable_is_pending(&hid_ready_timeout_work)) {
+		goto out;
+	}
+	settings.settle_ms = 60000;
+	apply_device_settings(&settings);
+	if (k_work_delayable_is_pending(&hid_ready_timeout_work)) {
+		goto out;
+	}
+	pending.kind = PENDING_SLOT;
+	wait_for_hid();
+	if (k_ticks_to_ms_ceil64(k_work_delayable_remaining_get(
+				       &hid_ready_timeout_work)) < 69900) {
+		goto out;
+	}
+	deadline = k_work_delayable_expires_get(&hid_ready_timeout_work);
+	/* Re-evaluation must neither extend nor shorten an active deadline. */
+	wait_for_hid();
+	if (k_work_delayable_expires_get(&hid_ready_timeout_work) != deadline) {
+		goto out;
+	}
+	/* An unplug apply can also change settings after a slot was queued. */
+	settings.settle_ms = 500;
+	apply_device_settings(&settings);
+	if (k_work_delayable_expires_get(&hid_ready_timeout_work) != deadline) {
+		goto out;
+	}
+	k_work_cancel_delayable(&hid_ready_timeout_work);
+	wait_for_hid();
+	deadline = k_work_delayable_expires_get(&hid_ready_timeout_work);
+	settings.settle_ms = 60000;
+	apply_device_settings(&settings);
+	if (k_work_delayable_expires_get(&hid_ready_timeout_work) <= deadline ||
+	    k_ticks_to_ms_ceil64(k_work_delayable_remaining_get(
+				       &hid_ready_timeout_work)) < 69900) {
+		goto out;
+	}
+	result = 0;
+out:
+	k_work_cancel_delayable(&hid_ready_timeout_work);
+	pending = saved_pending;
+	device_settings = saved_settings;
+	state = saved_state;
+	return result;
 }
 
 static int app_selftest(void)
@@ -1965,26 +2371,35 @@ static void load_test_config(void)
 
 /* Application callbacks from the button module (workqueue context). */
 
+static void start_connecting(void)
+{
+	/* A completed click is a fresh request even if the preceding link went
+	 * idle while the button module was still collecting that gesture. */
+	pending_clear();
+	set_state(STATE_CONNECTING);
+	atomic_set(&adv_restart_pending, 1);
+	if (!atomic_get(&connection_releasing) && !cur_conn) {
+		k_work_submit(&adv_work);
+	}
+	k_work_reschedule(&connect_timeout_work, K_SECONDS(CONNECT_TIMEOUT_S));
+	printk("-> CONNECTING (button)\n");
+}
+
 void button_pressed(void)
 {
-	/* Visual feedback: mirror the button (unless pairing is blinking). */
-	if (state != STATE_PAIRING) {
-		gpio_pin_set_dt(&led, 1);
-	}
+	/* Retain steady feedback through the click-count window. Pairing and
+	 * an active transmission take priority in the LED worker. */
+	led_button_feedback(true);
+	/* Do not disconnect while this new gesture is being collected. If
+	 * teardown already began, start_connecting waits for recycled instead. */
+	k_work_cancel_delayable(&grace_work);
+	k_work_cancel_delayable(&pairing_disconnect_work);
 
 	/* Start connecting immediately so the link is (nearly) up by the time
 	 * the click count is known. A long press will disconnect and enter
 	 * pairing instead. */
 	if (state == STATE_IDLE) {
-		/* Fresh cycle: drop any stale pending code left by a badly-timed
-		 * click from a previous cycle, so it can never be typed on this
-		 * new connection (only the most recent code is ever sent). */
-		pending_clear();
-
-		advertise(false, true);
-		set_state(STATE_CONNECTING);
-		k_work_reschedule(&connect_timeout_work, K_SECONDS(CONNECT_TIMEOUT_S));
-		printk("-> CONNECTING (press)\n");
+		start_connecting();
 	}
 }
 
@@ -2001,13 +2416,12 @@ void button_clicked(int count)
 	}
 
 	/* Visual feedback: button released. */
-	gpio_pin_set_dt(&led, 0);
+	led_button_feedback(false);
 
-	/* A click that completed after the device already went idle (badly
-	 * timed) has no link to type on: discard it rather than leaving a
-	 * stale pending code that the next connection would type. */
+	/* A disconnect may finish between press and click-window completion.
+	 * Reconnect for this gesture rather than silently discarding it. */
 	if (state == STATE_IDLE) {
-		return;
+		start_connecting();
 	}
 
 	/* SWD hook: reload the hardcoded test config. */
@@ -2021,8 +2435,10 @@ void button_clicked(int count)
 	/* Re-read config if USB is connected. Apply it only after two matching
 	 * snapshots so a host save cannot expose a partial file. */
 	if (usb_msc_is_connected()) {
+		k_work_cancel_delayable(&hid_ready_timeout_work);
 		pending.kind = PENDING_CONFIG_READ;
 		pending.slot_idx = count - 1;
+		led_refresh();
 		config_retry_count = 0;
 		config_fs_stable_reset();
 		config_retry_handler(NULL);
@@ -2108,6 +2524,7 @@ int main(void)
 	battery_set_low_threshold(device_settings.low_battery_mv);
 #endif
 	kbd_set_subscribed_cb(on_subscribed);
+	kbd_set_host_setup_cb(on_host_setup);
 	kbd_set_output_write_cb(on_output_write);
 	bt_conn_auth_info_cb_register(&auth_info_cb);
 
@@ -2116,6 +2533,7 @@ int main(void)
 			      preferred_fallback_handler);
 	k_work_init_delayable(&pairing_timeout_work, pairing_timeout_handler);
 	k_work_init_delayable(&settle_work, settle_work_handler);
+	k_work_init_delayable(&hid_ready_timeout_work, hid_ready_timeout_handler);
 	k_work_init_delayable(&grace_work, grace_work_handler);
 	k_work_init(&adv_work, adv_work_handler);
 	k_work_init_delayable(&config_poll_work, config_poll_handler);
@@ -2132,7 +2550,8 @@ int main(void)
 	} else {
 		selftest_failed = totp_selftest() || config_selftest() ||
 				  config_fs_selftest() || time_selftest() ||
-				  profiles_selftest() || kbd_selftest() || app_selftest();
+				  profiles_selftest() || kbd_selftest() ||
+				  led_selftest() || hid_ready_selftest() || app_selftest();
 		printk("TOTP selftest %s\n", selftest_failed ? "FAILED" : "ok");
 	}
 
@@ -2141,6 +2560,8 @@ int main(void)
 	load_test_config();
 #endif
 
+	/* Boot self-tests exercise pending requests without starting animations. */
+	led_live = true;
 	err = bt_enable(bt_ready);
 	if (err) {
 		printk("Bluetooth init failed (err %d)\n", err);

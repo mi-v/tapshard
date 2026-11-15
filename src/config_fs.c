@@ -8,8 +8,12 @@
 #include <errno.h>
 
 #include <ff.h>
+#include <diskio.h>
 #include <zephyr/fs/fs.h>
 #include <zephyr/storage/disk_access.h>
+#if defined(CONFIG_TOTP_TEST_POLL)
+#include <zephyr/drivers/disk.h>
+#endif
 
 #include "config.h"
 #include "config_fs.h"
@@ -42,6 +46,69 @@ static struct file_signature stable_candidate;
 static bool stable_candidate_valid;
 volatile int dbg_disk_wipe_count;
 volatile int dbg_disk_wipe_err;
+
+#if defined(CONFIG_TOTP_TEST_POLL)
+/* Bench-only fault injection uses the pinned disk layer's internal lookup;
+ * production never alters a disk's reference counter. Run before BLE/USB. */
+extern struct disk_info *disk_access_get_di(const char *name);
+volatile int dbg_fs_ref_stress;
+volatile int dbg_fs_ref_before;
+volatile int dbg_fs_ref_after;
+#endif
+
+/* Zephyr's disk_initialize takes a counted disk reference, while direct
+ * FatFs f_mount(NULL) does not release one. Track only successful RAM-disk
+ * initializations, including failed mounts and f_mkfs, so cleanup cannot
+ * release an MSC reference or decrement after a failed initialization.
+ * Filesystem calls are serialized by the application workqueue. */
+#ifdef FF_VOLUME_STRS
+static const char *const volume_names[] = { FF_VOLUME_STRS };
+#else
+#define volume_names VolumeStr
+#endif
+static uint32_t ram_owned_refs;
+static uint32_t ram_init_count;
+
+DSTATUS __real_disk_initialize(BYTE pdrv);
+
+DSTATUS __wrap_disk_initialize(BYTE pdrv)
+{
+	DSTATUS status = __real_disk_initialize(pdrv);
+
+	if (status == 0 && pdrv < FF_VOLUMES &&
+	    strcmp(volume_names[pdrv], "RAM") == 0) {
+		ram_owned_refs++;
+		ram_init_count++;
+	}
+	return status;
+}
+
+static FRESULT ram_unmount(void)
+{
+	FRESULT res = f_mount(NULL, "RAM:", 0);
+
+	if (res != FR_OK) {
+		return res;
+	}
+	while (ram_owned_refs) {
+		if (disk_access_ioctl("RAM", DISK_IOCTL_CTRL_DEINIT, NULL) != 0) {
+			return FR_DISK_ERR;
+		}
+		ram_owned_refs--;
+	}
+	return FR_OK;
+}
+
+static FRESULT ram_mount(void)
+{
+	FRESULT res = f_mount(&fat_fs, "RAM:", 1);
+
+	if (res != FR_OK) {
+		/* A bad boot sector can fail after disk initialization succeeded. */
+		ram_unmount();
+	}
+	return res;
+}
 
 /* FNV-1a is used only as a compact change detector, never as authentication. */
 static uint64_t hash_bytes(const void *data, size_t len)
@@ -108,7 +175,7 @@ static int read_config_raw(struct file_signature *sig)
 	uint32_t size;
 
 	secure_zero(read_buf, sizeof(read_buf));
-	res = f_mount(&fat_fs, "RAM:", 1);
+	res = ram_mount();
 	if (res != FR_OK) {
 		return -EIO;
 	}
@@ -116,26 +183,26 @@ static int read_config_raw(struct file_signature *sig)
 	res = f_stat("RAM:/config.ini", &before);
 	if (res == FR_NO_FILE) {
 		memset(sig, 0, sizeof(*sig));
-		f_mount(NULL, "RAM:", 0);
+		ram_unmount();
 		return 0;
 	}
 	if (res != FR_OK || (before.fattrib & AM_DIR)) {
-		f_mount(NULL, "RAM:", 0);
+		ram_unmount();
 		return -EIO;
 	}
 	if (before.fsize >= sizeof(read_buf)) {
-		f_mount(NULL, "RAM:", 0);
+		ram_unmount();
 		return -EFBIG;
 	}
 	size = (uint32_t)before.fsize;
 
 	res = f_open(&fp, "RAM:/config.ini", FA_READ);
 	if (res == FR_NO_FILE) {
-		f_mount(NULL, "RAM:", 0);
+		ram_unmount();
 		return -EAGAIN;
 	}
 	if (res != FR_OK) {
-		f_mount(NULL, "RAM:", 0);
+		ram_unmount();
 		return -EIO;
 	}
 
@@ -147,7 +214,7 @@ static int read_config_raw(struct file_signature *sig)
 	if (res == FR_OK) {
 		res = f_stat("RAM:/config.ini", &after);
 	}
-	f_mount(NULL, "RAM:", 0);
+	ram_unmount();
 
 	if (res != FR_OK || br != size) {
 		secure_zero(read_buf, sizeof(read_buf));
@@ -248,14 +315,14 @@ int config_fs_capture_baseline(void)
 
 	root_baseline_valid = false;
 	root_baseline_count = 0;
-	res = f_mount(&fat_fs, "RAM:", 1);
+	res = ram_mount();
 	if (res != FR_OK) {
 		return -EIO;
 	}
 
 	res = f_opendir(&dir, "RAM:");
 	if (res != FR_OK) {
-		f_mount(NULL, "RAM:", 0);
+		ram_unmount();
 		return -EIO;
 	}
 
@@ -281,7 +348,7 @@ int config_fs_capture_baseline(void)
 	if (f_closedir(&dir) != FR_OK && err == 0) {
 		err = -EIO;
 	}
-	f_mount(NULL, "RAM:", 0);
+	ram_unmount();
 
 	if (err == 0) {
 		root_baseline_valid = true;
@@ -317,13 +384,13 @@ int config_fs_latest_session_change(struct config_fs_change *change)
 	if (!root_baseline_valid) {
 		return -EINVAL;
 	}
-	res = f_mount(&fat_fs, "RAM:", 1);
+	res = ram_mount();
 	if (res != FR_OK) {
 		return -EIO;
 	}
 	res = f_opendir(&dir, "RAM:");
 	if (res != FR_OK) {
-		f_mount(NULL, "RAM:", 0);
+		ram_unmount();
 		return -EIO;
 	}
 
@@ -357,7 +424,7 @@ int config_fs_latest_session_change(struct config_fs_change *change)
 	if (f_closedir(&dir) != FR_OK && err == 0) {
 		err = -EIO;
 	}
-	f_mount(NULL, "RAM:", 0);
+	ram_unmount();
 
 	if (err != 0) {
 		return err;
@@ -381,7 +448,7 @@ int config_fs_wipe(void)
 	secure_zero(read_buf, sizeof(read_buf));
 
 	/* No filesystem operation may race the raw physical erase. */
-	res = f_mount(NULL, "RAM:", 0);
+	res = ram_unmount();
 	if (res != FR_OK) {
 		dbg_disk_wipe_err = -EIO;
 		return -EIO;
@@ -400,6 +467,10 @@ int config_fs_wipe(void)
 		return -EIO;
 	}
 	err = fs_mkfs(FS_FATFS, (uintptr_t)"RAM:", NULL, 0);
+	/* Formatting initializes the disk even without a mounted FATFS. */
+	if (ram_unmount() != FR_OK && err == 0) {
+		err = -EIO;
+	}
 	dbg_disk_wipe_err = err;
 	return err == 0 ? 0 : -EIO;
 }
@@ -415,20 +486,20 @@ int config_fs_write_config(const char *text)
 	UINT bw;
 	size_t len = strlen(text);
 
-	res = f_mount(&fat_fs, "RAM:", 1);
+	res = ram_mount();
 	if (res != FR_OK) {
 		return -EIO;
 	}
 
 	res = f_open(&fp, "RAM:/config.ini", FA_WRITE | FA_CREATE_ALWAYS);
 	if (res != FR_OK) {
-		f_mount(NULL, "RAM:", 0);
+		ram_unmount();
 		return -EIO;
 	}
 
 	res = f_write(&fp, text, len, &bw);
 	close_res = f_close(&fp);
-	unmount_res = f_mount(NULL, "RAM:", 0);
+	unmount_res = ram_unmount();
 
 	if (res != FR_OK || bw != len || close_res != FR_OK ||
 	    unmount_res != FR_OK) {
@@ -447,20 +518,20 @@ int config_fs_log(const char *msg)
 	UINT bw;
 	size_t len = strlen(msg);
 
-	res = f_mount(&fat_fs, "RAM:", 1);
+	res = ram_mount();
 	if (res != FR_OK) {
 		return -EIO;
 	}
 
 	res = f_open(&fp, "RAM:/log.txt", FA_WRITE | FA_CREATE_ALWAYS);
 	if (res != FR_OK) {
-		f_mount(NULL, "RAM:", 0);
+		ram_unmount();
 		return -EIO;
 	}
 
 	res = f_write(&fp, msg, len, &bw);
 	close_res = f_close(&fp);
-	unmount_res = f_mount(NULL, "RAM:", 0);
+	unmount_res = ram_unmount();
 
 	if (res != FR_OK || bw != len || close_res != FR_OK ||
 	    unmount_res != FR_OK) {
@@ -471,6 +542,17 @@ int config_fs_log(const char *msg)
 
 int config_fs_selftest(void)
 {
+	struct config_fs_change change;
+	struct totp_config cfg;
+	uint32_t sectors;
+	uint32_t initializations = ram_init_count;
+	int result = -1;
+	int i;
+#if defined(CONFIG_TOTP_TEST_POLL)
+	struct disk_info *disk;
+	uint16_t saved_refs;
+#endif
+
 	/* 2020-01-01 00:00:00 = 1577836800 */
 	if (fat_time_to_unix(((2020 - 1980) << 9) | (1 << 5) | 1, 0) !=
 	    1577836800ULL) {
@@ -487,5 +569,68 @@ int config_fs_selftest(void)
 			     (10 << 11)) != 1788429600ULL) {
 		return -1;
 	}
-	return 0;
+	if (ram_owned_refs != 0) {
+		return -1;
+	}
+#if defined(CONFIG_TOTP_TEST_POLL)
+	disk = disk_access_get_di("RAM");
+	if (!disk) {
+		return -1;
+	}
+	saved_refs = disk->refcnt;
+	disk->refcnt = UINT16_MAX - 2;
+	dbg_fs_ref_stress = 1;
+	dbg_fs_ref_before = disk->refcnt;
+#endif
+	if (config_fs_wipe() != 0 ||
+	    config_fs_write_config("[device]\ntimezone = 0\n") != 0 ||
+	    config_fs_log("reference selftest") != 0) {
+		goto out;
+	}
+	/* Repeated forced remounts must not consume the 16-bit disk count. */
+	for (i = 0; i < 32; i++) {
+		if (config_fs_capture_baseline() != 0 ||
+		    config_fs_latest_session_change(&change) != -ENOENT ||
+		    config_fs_read(&cfg) != 0 || ram_owned_refs != 0) {
+			goto out;
+		}
+	}
+#if defined(CONFIG_TOTP_TEST_POLL)
+	/* A refused initialization acquired nothing; cleanup must not release
+	 * someone else's reference to make room. */
+	disk->refcnt = UINT16_MAX;
+	if (config_fs_read(&cfg) != -EIO || disk->refcnt != UINT16_MAX ||
+	    ram_owned_refs != 0) {
+		disk->refcnt = UINT16_MAX - 2;
+		goto out;
+	}
+	disk->refcnt = UINT16_MAX - 2;
+#endif
+	/* Failed mounts take a reference too, unless initialization itself
+	 * fails. Exercise corrupt/absent FAT cleanup without auto-formatting. */
+	if (disk_access_ioctl("RAM", DISK_IOCTL_GET_SECTOR_COUNT, &sectors) != 0 ||
+	    disk_access_erase("RAM", 0, sectors, DISK_ACCESS_ERASE_PHYSICAL) != 0 ||
+	    config_fs_read(&cfg) != -EIO ||
+	    config_fs_capture_baseline() != -EIO ||
+	    config_fs_write_config("test") != -EIO ||
+	    config_fs_log("test") != -EIO || ram_owned_refs != 0) {
+		goto out;
+	}
+	result = 0;
+out:
+	secure_zero(&cfg, sizeof(cfg));
+	/* Also catch a missing linker wrap: a zero ledger alone would hide it. */
+	if (config_fs_wipe() != 0 || ram_owned_refs != 0 ||
+	    ram_init_count == initializations) {
+		result = -1;
+	}
+#if defined(CONFIG_TOTP_TEST_POLL)
+	dbg_fs_ref_after = disk->refcnt;
+	if (disk->refcnt != UINT16_MAX - 2) {
+		result = -1;
+	}
+	disk->refcnt = saved_refs;
+	dbg_fs_ref_stress = result == 0 ? 2 : -1;
+#endif
+	return result;
 }

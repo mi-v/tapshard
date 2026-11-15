@@ -32,7 +32,7 @@
 #include "totp.h"
 #include "secure_zero.h"
 
-#define DEFAULT_SETTLE_MS    200
+#define DEFAULT_SETTLE_MS    500
 #define DEFAULT_INTER_KEY_MS 60
 #define DEFAULT_DIGITS       6
 #define DEFAULT_PERIOD       30

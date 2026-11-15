@@ -51,7 +51,8 @@ int config_fs_log(const char *msg);
 /* Convert FAT date/time (fdate/ftime) to Unix seconds (local time). */
 uint64_t fat_time_to_unix(uint16_t fdate, uint16_t ftime);
 
-/* Self-test. Returns 0 on success. */
+/* Boot-only self-test: formats and exercises the RAM volume. Call before USB
+ * enumeration or provisioning. Returns 0 on success. */
 int config_fs_selftest(void);
 
 #endif /* CONFIG_FS_H */

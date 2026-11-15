@@ -86,6 +86,7 @@ static const struct hids_info info = {
 
 static volatile int cccd_notify; /* 1 = central subscribed to notifications */
 static void (*subscribed_cb)(void);
+static void (*host_setup_cb)(void);
 
 /* Debug: last CCC value written (inspected via SWD). */
 volatile int dbg_ccc_notify;
@@ -94,6 +95,7 @@ volatile int dbg_ccc_notify;
 volatile int dbg_notify_sent;
 volatile int dbg_notify_err;
 volatile int dbg_output_write;
+volatile int dbg_hid_setup;
 volatile int dbg_notify_completed;
 volatile int dbg_notify_retries;
 volatile int dbg_notify_aborts;
@@ -141,11 +143,22 @@ static ssize_t read_report_map(struct bt_conn *conn, const struct bt_gatt_attr *
 static ssize_t read_input_report(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 				 void *buf, uint16_t len, uint16_t offset);
 static void input_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value);
+static ssize_t input_ccc_write(struct bt_conn *conn,
+			       const struct bt_gatt_attr *attr, uint16_t value);
 static void sender_work_handler(struct k_work *work);
+
+static void host_setup_activity(void)
+{
+	dbg_hid_setup++;
+	if (host_setup_cb) {
+		host_setup_cb();
+	}
+}
 
 static ssize_t read_protocol_mode(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 				  void *buf, uint16_t len, uint16_t offset)
 {
+	host_setup_activity();
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, &protocol_mode,
 				 sizeof(protocol_mode));
 }
@@ -153,6 +166,7 @@ static ssize_t read_protocol_mode(struct bt_conn *conn, const struct bt_gatt_att
 static ssize_t read_report_ref(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			       void *buf, uint16_t len, uint16_t offset)
 {
+	host_setup_activity();
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, input_ref,
 				 sizeof(input_ref));
 }
@@ -162,6 +176,7 @@ static void (*output_write_cb)(void);
 static ssize_t read_output_ref(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			       void *buf, uint16_t len, uint16_t offset)
 {
+	host_setup_activity();
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, output_ref,
 				 sizeof(output_ref));
 }
@@ -218,8 +233,8 @@ BT_GATT_SERVICE_DEFINE(hog_svc,
 			       BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
 			       BT_GATT_PERM_READ_ENCRYPT,
 			       read_input_report, NULL, &report_value),
-	BT_GATT_CCC(input_ccc_changed,
-		    BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
+	BT_GATT_CCC_WITH_WRITE_CB(input_ccc_changed, input_ccc_write,
+				  BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT),
 	BT_GATT_DESCRIPTOR(BT_UUID_HIDS_REPORT_REF, BT_GATT_PERM_READ,
 			   read_report_ref, NULL, (void *)input_ref),
 
@@ -243,6 +258,7 @@ BT_GATT_SERVICE_DEFINE(hog_svc,
 static ssize_t read_info(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			 void *buf, uint16_t len, uint16_t offset)
 {
+	host_setup_activity();
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, &info,
 				 sizeof(info));
 }
@@ -250,6 +266,7 @@ static ssize_t read_info(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 static ssize_t read_report_map(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			       void *buf, uint16_t len, uint16_t offset)
 {
+	host_setup_activity();
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, report_map,
 				 sizeof(report_map));
 }
@@ -273,6 +290,17 @@ static void input_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
 	}
 }
 
+static ssize_t input_ccc_write(struct bt_conn *conn,
+			       const struct bt_gatt_attr *attr, uint16_t value)
+{
+	/* Restoring a bonded CCC is not a new host write. Observe explicit
+	 * writes even when they leave the restored value unchanged. */
+	if (value & BT_GATT_CCC_NOTIFY) {
+		host_setup_activity();
+	}
+	return sizeof(value);
+}
+
 void kbd_init(void)
 {
 	cccd_notify = 0;
@@ -289,6 +317,11 @@ bool kbd_is_subscribed(void)
 void kbd_set_subscribed_cb(void (*cb)(void))
 {
 	subscribed_cb = cb;
+}
+
+void kbd_set_host_setup_cb(void (*cb)(void))
+{
+	host_setup_cb = cb;
 }
 
 /* Map ASCII digit to USB HID usage. */

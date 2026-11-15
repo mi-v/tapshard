@@ -13,9 +13,13 @@ void kbd_init(void);
 /* True if a central has subscribed to notifications on the input report. */
 bool kbd_is_subscribed(void);
 
-/* Register a callback invoked (workqueue context) when a central subscribes
- * to notifications. Used by the app to know the host is ready for reports. */
+/* Register a callback invoked (ATT RX context) when a central subscribes
+ * to notifications. Subscription alone does not prove host input readiness. */
 void kbd_set_subscribed_cb(void (*cb)(void));
+
+/* HID metadata reads and explicit notification-enable writes indicate that
+ * the host is still preparing its HID input path. Invoked in ATT RX context. */
+void kbd_set_host_setup_cb(void (*cb)(void));
 
 /* Register a callback invoked when the host writes the output (LED) report.
  * Used as the "host HID stack is up" signal to start typing sooner. */

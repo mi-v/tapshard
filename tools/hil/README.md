@@ -69,6 +69,69 @@ application while the capture is active.
 The default input-device name is `TapShard TOTP token`. Use `--name` to select
 another input-device name explicitly.
 
+## First reconnect after Bluetooth restart
+
+Use a dedicated test adapter and a public test account. Retain the bond and
+let the token finish typing and disconnect before each restart. Capture the
+first click after restarting BlueZ, then repeat with Bluetooth off/on. Test
+the desktop toggle as well as `bluetoothctl power off/on`: a desktop may use
+rfkill, which exercises a different adapter path. Also capture the following
+click to distinguish a first-reconnect failure from a persistent one.
+
+Compare the entire captured code with the independent TOTP calculation, away
+from a period boundary. Successful notification completions alone do not
+prove that the host received the keys. Record `btmon` and input-device creation
+alongside SWD snapshots; `dbg_hid_setup` counts HID metadata reads and explicit
+notification-enable writes. A restored CCC can enable notifications before
+the host has registered its handler or created the input device. Verify that
+the first code survives that cold setup, with no explicit host-side `connect`
+command before the button press.
+
+## Waiting LED and disconnect-boundary checks
+
+Long USB visits require bounded disk references across forced FatFs remounts.
+Boot filesystem tests exercise scans, writes, formatting and failed mounts.
+With `CONFIG_TOTP_TEST_POLL=y`, a boot-only stress test starts the actual RAM
+disk count at 65533 and also tests initialization refusal at 65535. It restores
+the saved count before BLE/USB starts. `dbg_fs_ref_stress = 2` and matching
+`dbg_fs_ref_before/after = 65533` indicate success. Production omits this fault
+injection. Confirm `selftest_failed = 0` and a valid FAT configuration volume
+after the test; do not run filesystem self-tests on a provisioned live volume.
+
+During a known HID-settle or TOTP-boundary wait, the ramp follows that timer;
+a restarted wait restarts progress. Unknown waits retain the initial pattern.
+Waiting ramps from 3 to 10 Hz at 50% duty; typing is 10 Hz at 50% duty.
+Pairing is distinctly slower, at 1 Hz (500 ms on/off). Steady button feedback
+covers click collection; idle and completed sends leave the LED off.
+
+`dbg_led_mode` is off/button/pairing/waiting/typing = 0/1/2/3/4.
+`dbg_led_period_ms`, `dbg_led_on_ms`,
+`dbg_led_progress` (0..1000), `dbg_led_wait_restarts` and `dbg_led_edges`
+allow GPIO timing to be correlated with actual OTP capture. Sampling must
+use one pyOCD session with flushed gesture writes. Confirm the waiting ramp,
+deadline restarts, success/failure/cancel transitions and no LED edges in idle.
+
+For disconnect-boundary regression, send a public test OTP and time another
+single press around the end of `grace_ms`, including a press just before the
+deadline whose click window ends afterwards. Check that each gesture emits
+exactly one complete independently verified OTP. A press before teardown
+keeps the link; a press during teardown waits for the connection object to be
+recycled before reconnecting. Also check a fresh click after full disconnect,
+pairing cancellation and an idle LED with no timer activity.
+
+Also suppress subscription readiness after a completed send, then click again
+during grace. Repeat with a click during the post-pairing grace before readiness.
+Both pending requests must disconnect after the configured settling interval
+(at least 500 ms) plus 10 seconds, with `dbg_idle_reason = 12`. Host metadata
+activity must not restart that deadline. Restoring readiness before it expires
+must allow exactly one complete code, and the deadline must not truncate a
+legitimate long settling interval or a subsequent TOTP-boundary wait.
+The boot scheduling test also covers a pending config read at 500 ms followed
+by application of a 60 s settling value: no HID deadline is armed during config
+loading, and the resulting deadline allows the full new interval plus 10 s.
+It also checks that an explicit settling increase after queuing a slot extends
+the deadline, while ordinary re-evaluation or a decrease does not truncate it.
+
 ## Windows helpers
 
 Copy `Capture-Totp.ps1` and `Windows-Hil.ps1` to the Windows test VM. Start the

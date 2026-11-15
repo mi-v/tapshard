@@ -41,8 +41,10 @@ timezone = 0
 
 # How long to wait after the host subscribes before considering the HID link
 # "ready" to type. A value with no unit is milliseconds; "ms" and "s" suffixes
-# are also accepted. Accepted range: 0..60000ms. (default: 200ms)
-conn_settle_time = 200ms
+# are also accepted. Accepted range: 0..60000ms. (default: 500ms)
+# The fallback wait has a 500ms minimum and restarts when the host reads HID
+# metadata or enables notifications. A keyboard LED report can end it sooner.
+conn_settle_time = 500ms
 
 # Delay between each key press/release while typing. Accepted range:
 # 1..5000ms. (default: 60ms)
