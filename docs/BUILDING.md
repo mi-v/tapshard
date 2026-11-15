@@ -60,10 +60,23 @@ Install **`build-uf2/zephyr/zephyr.uf2`** through the board's factory USB drive.
 Read [installation and recovery](UF2.md) before copying it: this image installs
 the wiping bootloader and enables persistent debug-port protection.
 
-The default PID `1209:0001` is for private testing. Source builds for personal
-testing use that default; binary/device distribution requires an allocated PID.
-An allocated PID can be supplied as `-DCONFIG_TOTP_USB_PID=0xNNNN` alongside the
-configuration fragment. See [the allocation policy](https://pid.codes/1209/0001/).
+The default USB identity is the shared Mass Storage pair `16c0:27df`, used under
+[Objective Development's sharing terms](https://github.com/obdev/v-usb/blob/master/usbdrv/USB-IDs-for-free.txt).
+The serial starts with the owner-controlled `mivlad@gmail.com:` prefix and
+appends `tapshard-` plus 16 uppercase hexadecimal digits from the board's
+hardware ID. Keep the prefix and the standard OS mass-storage driver when
+distributing TapShard builds. Host discovery must check the serial as well as
+the VID/PID; the UF2 uploader does this automatically using the selected build's
+effective IDs.
+
+For a different authorized identity, supply both
+`-DCONFIG_TOTP_USB_VID=0xVVVV` and `-DCONFIG_TOTP_USB_PID=0xPPPP` alongside the
+configuration fragment. These settings do not allocate an ID. Builds using the
+old `1209:0001` private-test pair must not be redistributed.
+
+When updating an existing build from the old testing identity, use a pristine
+build (`west build -p always ...`) or explicitly set both IDs to `0x16c0` and
+`0x27df`. Existing build directories can retain previous configuration overrides.
 
 Each build validates that the UF2 contains only application addresses. The
 independent bootloader payload, compiler/source hashes and ELF are generated

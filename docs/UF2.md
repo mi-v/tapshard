@@ -2,8 +2,9 @@
 
 Use the protected UF2 image for normal operation. The
 [build guide](BUILDING.md) also describes unlocked developer and measurement
-images. The default USB PID is for private testing; see the
-[project README](../README.md#project-status-and-security) before distribution.
+images. Application USB uses the shared Mass Storage identity `16c0:27df` with
+a per-board serial; see the [USB identity and sharing terms](BUILDING.md#build-normal-protected-firmware).
+Factory recovery keeps the board's original USB identity.
 
 ## Compatibility
 

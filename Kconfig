@@ -31,14 +31,23 @@ config TOTP_POWER_DIAGNOSTIC
 	  sampling, or button handling, then enter System OFF. No secrets can be
 	  provisioned. Reset wakes the board; factory recovery remains available.
 
-config TOTP_USB_PID
-	hex "USB product ID (default is private testing only)"
+config TOTP_USB_VID
+	hex "USB vendor ID"
 	range 0x0001 0xffff
-	default 0x0001
+	default 0x16c0
 	help
-	  The default VID:PID 1209:0001 is the shared pid.codes private-test ID.
-	  It is not unique and must not be used for redistributed binaries or
-	  manufactured devices. Set an allocated PID before a public release.
+	  The default VID:PID 16c0:27df is Objective Development's shared Mass
+	  Storage identity. Its serial-number and class-driver rules apply.
+	  Override both VID and PID only with a pair you are authorized to use.
+
+config TOTP_USB_PID
+	hex "USB product ID"
+	range 0x0001 0xffff
+	default 0x27df
+	help
+	  The default is shared with other Mass Storage devices under VID 16c0.
+	  Host tools must also check TapShard's serial prefix. Changing this
+	  option does not allocate a PID; use only an authorized VID/PID pair.
 
 config TOTP_TEST_POLL
 	bool "Enable SWD button-emulation poll (debug)"

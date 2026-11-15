@@ -30,5 +30,5 @@ Interface references:
 - [Nordic S140 6.1.1 MBR API](https://github.com/adafruit/Adafruit_nRF52_Bootloader/blob/0.9.2/lib/softdevice/s140_nrf52_6.1.1/s140_nrf52_6.1.1_API/include/nrf52/nrf_mbr.h)
 - [Adafruit 0.9.2 handoff and GPREGRET behavior](https://github.com/adafruit/Adafruit_nRF52_Bootloader/blob/0.9.2/src/main.c)
 - [Zephyr Pro Micro board documentation](https://docs.zephyrproject.org/latest/boards/others/promicro_nrf52840/doc/index.html)
-- [Private testing PID policy](https://pid.codes/1209/0001/)
+- [Objective Development shared USB IDs and usage terms](https://github.com/obdev/v-usb/blob/master/usbdrv/USB-IDs-for-free.txt)
 - [Nordic nRF52840 debug/protection reference](https://docs.nordicsemi.com/r/bundle/ps_nrf52840/page/dif.html)

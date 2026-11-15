@@ -13,8 +13,9 @@ unplug applies the edited configuration. Unplug then erases and reformats the
 entire RAM disk. Secrets and per-host profiles are RAM-only.
 
 USB manufacturer/product: `TapShard`; storage vendor/model: `TapShard` / `Config`;
-BLE name: `TapShard TOTP token`; USB serial: `totp-01`. Factory recovery identities
-are independent of application branding.
+BLE name: `TapShard TOTP token`. Application USB defaults to `16c0:27df` with
+serial `mivlad@gmail.com:tapshard-<16 uppercase hex digits>` from the board's
+hardware ID. Factory recovery identities are independent of application branding.
 
 ## Layout
 
@@ -55,8 +56,11 @@ in [tools/hil/README.md](tools/hil/README.md).
 Keep routine SWD development unlocked. The protected configuration is
 `conf/uf2-production.conf`; testing protection on a development board requires
 an explicit lock/erase/restore cycle and verified off-board recovery images.
-The private-test PID `1209:0001` must not be used for distributed binaries or
-devices. Preserve the compiler-version and boot startup checks.
+The default shared Mass Storage ID follows Objective Development's serial-prefix
+and standard-class-driver rules. Host discovery must check the complete TapShard
+serial prefix and suffix format as well as VID/PID. Custom VID/PID pairs require
+authorization; `1209:0001` remains private testing only. Preserve the
+compiler-version and boot startup checks.
 
 All host scripts need memory/time bounds: `sh tools/run-limited.sh command ...`
 defaults to 512 MiB per process and 120 seconds. Builds use 1 GiB, 240 seconds

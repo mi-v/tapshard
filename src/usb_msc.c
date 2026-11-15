@@ -1,14 +1,16 @@
 /*
  * USB Mass Storage device — presents the config disk to the host.
  *
- * Uses the new (usbd) USB device stack with a fixed identity:
- *   VID 0x1209, configurable PID, serial "totp-01".
- * The default PID 0x0001 is shared, private testing only: it is not unique
- * and must not be used on redistributed binaries or manufactured devices.
+ * Uses the new (usbd) USB device stack. Default VID:PID 16c0:27df is
+ * Objective Development's shared Mass Storage identity. The serial starts
+ * with an owner-controlled email address and distinguishes individual boards.
  */
+
+#include <string.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/usb/usbd.h>
 #include <zephyr/usb/usbd_msg.h>
@@ -18,8 +20,12 @@
 #include "config_fs.h"
 #include "usb_power_replay.h"
 
-#define USB_VID 0x1209
+#define USB_VID CONFIG_TOTP_USB_VID
 #define USB_PID CONFIG_TOTP_USB_PID
+#define USB_SERIAL_PREFIX "mivlad@gmail.com:tapshard-"
+#define USB_SERIAL_TEMPLATE USB_SERIAL_PREFIX "0000000000000000"
+
+static char usb_serial[sizeof(USB_SERIAL_TEMPLATE)];
 
 /* Device context on the default USB controller (usbd). */
 USBD_DEVICE_DEFINE(totp_usbd,
@@ -30,7 +36,15 @@ USBD_DEVICE_DEFINE(totp_usbd,
 USBD_DESC_LANG_DEFINE(totp_lang);
 USBD_DESC_MANUFACTURER_DEFINE(totp_mfr, "TapShard");
 USBD_DESC_PRODUCT_DEFINE(totp_product, "TapShard");
-USBD_DESC_STRING_DEFINE(totp_sn, "totp-01", USBD_DUT_STRING_SERIAL_NUMBER);
+static struct usbd_desc_node totp_sn = {
+	.str = {
+		.utype = USBD_DUT_STRING_SERIAL_NUMBER,
+		.ascii7 = true,
+	},
+	.ptr = usb_serial,
+	.bLength = USB_STRING_DESCRIPTOR_LENGTH(USB_SERIAL_TEMPLATE),
+	.bDescriptorType = USB_DESC_STRING,
+};
 USBD_DESC_CONFIG_DEFINE(totp_fs_cfg, "FS Configuration");
 
 /* Full-speed configuration (bus-powered, 100 mA). */
@@ -99,7 +113,23 @@ void usb_msc_set_vbus_cb(void (*cb)(bool present))
 
 static int usb_msc_setup(void)
 {
+	static const char hex[] = "0123456789ABCDEF";
+	uint8_t hwid[8];
+	ssize_t len;
 	int err;
+
+	/* Preserve HWINFO's byte order, matching Zephyr's own serial encoder.
+	 * The buffer must remain valid for later string descriptor requests. */
+	len = hwinfo_get_device_id(hwid, sizeof(hwid));
+	if (len != (ssize_t)sizeof(hwid)) {
+		return len < 0 ? (int)len : -EIO;
+	}
+	memcpy(usb_serial, USB_SERIAL_PREFIX, sizeof(USB_SERIAL_PREFIX) - 1);
+	for (size_t i = 0; i < sizeof(hwid); i++) {
+		usb_serial[sizeof(USB_SERIAL_PREFIX) - 1 + i * 2] = hex[hwid[i] >> 4];
+		usb_serial[sizeof(USB_SERIAL_PREFIX) + i * 2] = hex[hwid[i] & 0xf];
+	}
+	usb_serial[sizeof(usb_serial) - 1] = '\0';
 
 	err = usbd_add_descriptor(&totp_usbd, &totp_lang);
 	if (err) {

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from pyocd.core.helpers import ConnectHelper
 from validate import validate
+from usb_identity import read_usb_ids
 
 
 def run(command, **kwargs):
@@ -34,6 +35,7 @@ def read_bytes(target, address, size):
 
 
 def upload(args):
+    vid, pid = read_usb_ids(args.build)
     validate((args.build / "zephyr/zephyr.uf2").read_bytes())
     image = (args.build / "zephyr/zephyr.bin").read_bytes()
     bootloader = (args.build / "security-bootloader/bootloader.bin").read_bytes()
@@ -87,12 +89,18 @@ def upload(args):
         if reused:
             assert read_bytes(target, 0xe0000, 0xc000) == backup
         assert target.read32(0x10001208) & 0xff != 0, "bench unexpectedly protected"
-    run(ssh + ["lsusb -d 1209:0001"])
+    # Shared IDs alone cannot distinguish TapShard from unrelated devices.
+    # Run the standalone selector on the actual USB host, including its
+    # strict serial-prefix and ambiguity checks.
+    selector = Path(__file__).with_name("usb_identity.py").read_text()
+    device = json.loads(subprocess.check_output(ssh + [shlex.join([
+        "python3", "-c", selector, "--vid", f"{vid:04x}", "--pid", f"{pid:04x}",
+    ])], text=True, timeout=20))
     return {"test": "uf2-install", "image_sha256": hashlib.sha256(image).hexdigest(),
             "bootloader_sha256": hashlib.sha256(bootloader).hexdigest(),
             "factory_sha256": hashlib.sha256(factory).hexdigest(),
             "backup_reused": reused, "mbr_preserved": True,
-            "sync_status": sync.returncode}
+            "sync_status": sync.returncode, "usb_device": device}
 
 
 def main():

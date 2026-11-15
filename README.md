@@ -161,10 +161,12 @@ host and pairing session. The protected build wipes RAM on reset and enables
 debug-port protection. Resistance to deliberate hardware fault injection has
 not been established.
 
-Only source code is provided. The default USB ID
-`1209:0001` is reserved for private testing and is not unique. Do not distribute
-binaries or devices using that ID; an allocated PID is needed first. See the
-[PID policy](https://pid.codes/1209/0001/).
+Only source code is provided at present. USB uses the shared Mass Storage ID
+`16c0:27df` under [Objective Development's sharing terms](https://github.com/obdev/v-usb/blob/master/usbdrv/USB-IDs-for-free.txt).
+Each board has a stable serial of the form
+`mivlad@gmail.com:tapshard-<16 uppercase hex digits>`, derived from its hardware
+ID. Software identifying TapShard must check this serial prefix as well as the
+shared VID/PID. Normal use relies on the operating system's mass-storage driver.
 
 ## Building and contributing
 
