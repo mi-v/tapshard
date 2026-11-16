@@ -1205,14 +1205,6 @@ static size_t config_dump_text(void)
 	}
 #endif
 	dump_append(&pos, "\n");
-	if (bonds == 0) {
-		dump_append(&pos, "# No host was paired when this file was generated.\n");
-		dump_append(&pos, "# Accounts applied before pairing wait in an unassigned RAM profile (\"limbo\").\n");
-		dump_append(&pos, "# The first successfully paired host receives those accounts.\n");
-		dump_append(&pos, "# Pairing before saving is also supported: this USB session's file still\n");
-		dump_append(&pos, "# configures that first host when applied, even if another host pairs later.\n");
-		dump_append(&pos, "# Apply saved changes by unplugging USB or clicking while still plugged in.\n\n");
-	}
 
 	dump_append(&pos, "[device]\n");
 	format_offset(device_settings.timezone_min, tz, sizeof(tz));
@@ -1247,6 +1239,15 @@ static size_t config_dump_text(void)
 	dump_append(&pos, "low_battery_mv = %u\n",
 		    (unsigned)device_settings.low_battery_mv);
 	dump_append(&pos, "\n");
+
+	if (bonds == 0) {
+		dump_append(&pos, "# No host was paired when this file was generated.\n");
+		dump_append(&pos, "# Accounts applied before pairing wait in an unassigned RAM profile (\"limbo\").\n");
+		dump_append(&pos, "# The first successfully paired host receives those accounts.\n");
+		dump_append(&pos, "# Pairing before saving is also supported: this USB session's file still\n");
+		dump_append(&pos, "# configures that first host when applied, even if another host pairs later.\n");
+		dump_append(&pos, "# Apply saved changes by unplugging USB or clicking while still plugged in.\n\n");
+	}
 
 	if (profile->have_config && profile->slot_count > 0) {
 		for (i = 0; i < profile->slot_count; i++) {
