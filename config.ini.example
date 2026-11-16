@@ -34,8 +34,13 @@ timezone = 0
 # If host_id refers to a host being forgotten, its account edits are ignored
 # while the shared [device] settings still apply.
 #
-# With zero or one bond these keys are omitted: accounts apply to the limbo or
-# sole profile. A real device reset clears every bond as well as RAM secrets.
+# With zero or one bond these keys are omitted. Before pairing, applied accounts
+# wait in an unassigned RAM profile ("limbo") for the first successfully paired
+# host. With one bond, accounts apply to that host's profile. A file generated
+# while unpaired still configures the first host paired during that USB session,
+# even if pairing happens before saving or another host pairs before applying.
+# Generated status comments describe when the file was created, not live state.
+# A real device reset clears every bond as well as RAM secrets.
 # Changing host_id requires replacing every keep:N with an explicit Base32
 # secret; placeholders may never copy secrets between host profiles.
 

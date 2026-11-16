@@ -104,6 +104,17 @@ The device creates a new configuration dump on every USB connection. Existing
 secrets appear as `secret = keep:N`; preserve those references when editing or
 reordering accounts. They are valid only for the dump that contains them.
 
+You can configure accounts before pairing. Applied accounts wait in an
+unassigned RAM profile called **limbo**. The first successfully paired host
+receives those accounts, and limbo is cleared. Later hosts have separate account
+profiles; device-wide settings remain shared.
+
+Pairing while the USB drive is connected does not rewrite `config.ini`. If you
+pair before saving and applying an unpaired configuration file, it still
+configures the first host paired during that USB session, even if another host
+pairs later. Generated status comments, such as `bonded = no`, describe when
+the file was created and refresh on the next USB connection.
+
 ### 4. Type a code
 
 Focus the host's code-entry field, then click once for the first account, twice
