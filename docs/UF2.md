@@ -18,21 +18,10 @@ Adafruit/nice!nano factory layout. The installer checks:
 - Factory vectors and Adafruit-compatible GPREGRET `0x57` USB recovery behavior.
 
 Support is based on geometry and behavior, not a factory version allowlist.
-Factory **0.6.0** and **0.9.2**, both with S140 **6.1.1**, have been used on two
-boards. A different clone or factory layout may require board-specific work.
-The board must also match the button and external-regulator wiring in
+A factory version number alone does not establish compatibility. A different
+clone or factory layout may require board-specific work. The board must also
+match the button and external-regulator wiring in
 [the hardware description](../README.md#hardware).
-
-| Area | Validation coverage |
-|---|---|
-| Linux and Windows | Pairing, configuration, encrypted HID and multi-host reconnect |
-| macOS | Not validated |
-| Unlocked bootloader | Full SRAM wipe before stack use; real reset gestures; exact factory recovery; backup corruption and reset-interruption checks |
-| Persistent debug protection | Pin reset, factory recovery, UF2 reinstall and explicit erase/unlock on AAD0 silicon |
-| Native USB path | Installation and recovery with factory 0.6.0; protected installation reaches normal configuration; no independent SWD inspection |
-| Other silicon revisions | Software protection branch compile-checked |
-| Power removal/brownout during flash writes | Not validated; reset interruption is a separate test |
-| Deliberate fault injection | Resistance not established |
 
 ## First installation
 
@@ -136,6 +125,15 @@ Install pyOCD into the active environment and use an unlocked bench image with
 ```sh
 sh tools/run-limited.sh python -m unittest discover -s tools/uf2 -v
 ```
+
+For a new board, silicon revision or host platform, use these checks:
+
+| Area | Expected outcome |
+|---|---|
+| Host platform | Pairing, configuration, timestamp synchronization, encrypted HID and multi-host reconnect work; captured codes match an independent TOTP calculation. See the [HIL procedures](../tools/hil/README.md). |
+| Unlocked bootloader | All SRAM is wiped before stack use; real reset gestures restore the exact factory backup; corrupt backups and interrupted operations fail safely. |
+| Protected build | Debug access stays locked after pin reset, factory recovery and UF2 reinstall. Use an explicit erase/unlock/restore cycle to regain access, with off-board recovery images prepared first. |
+| Native USB | Factory recovery accepts the application UF2, installation reaches normal configuration, and triple reset returns to the factory drive. |
 
 These commands mutate the bench board and may destroy RAM or settings:
 

@@ -1,8 +1,8 @@
 # Building TapShard
 
-The supported build path is Linux, including Linux under WSL2. Normal device
-use is tested on Linux and Windows; native Windows/macOS builds are not covered
-by these instructions.
+These instructions use Linux, including Linux under WSL2, to build the firmware.
+The build host can be separate from the computer used to configure and receive
+codes from the token. Native Windows/macOS builds are not covered here.
 
 Use **upstream Zephyr v4.4.2**, **Zephyr SDK 1.0.1**, and its **GCC 14.3.0 ARM
 toolchain**. The independent bootloader checks the compiler version and verifies
@@ -74,9 +74,9 @@ For a different authorized identity, supply both
 configuration fragment. These settings do not allocate an ID. Builds using the
 old `1209:0001` private-test pair must not be redistributed.
 
-When updating an existing build from the old testing identity, use a pristine
-build (`west build -p always ...`) or explicitly set both IDs to `0x16c0` and
-`0x27df`. Existing build directories can retain previous configuration overrides.
+When changing USB IDs in an existing build, use a pristine build
+(`west build -p always ...`) or explicitly set both IDs. Existing build
+directories can retain previous configuration overrides.
 
 Each build validates that the UF2 contains only application addresses. The
 independent bootloader payload, compiler/source hashes and ELF are generated

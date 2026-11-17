@@ -6,6 +6,12 @@ results belong in ignored `*.local.json` files or `results/`. Start with the
 [build guide](../../docs/BUILDING.md) and an active Python environment containing
 pyOCD for SWD commands. Use unlocked images and test secrets only.
 
+A suitable multi-host setup uses a Linux host, a Windows host or VM, and a
+separate Bluetooth adapter for each. An SWD probe with nRESET connected allows
+automated button gestures and state inspection. Supply your own addresses,
+credentials and device identifiers; the helpers do not require a particular
+machine or VM manager.
+
 ## Firmware variants
 
 Build the normal four-bond development image:
@@ -136,18 +142,20 @@ the deadline, while ordinary re-evaluation or a decrease does not truncate it.
 
 ## Windows helpers
 
-Copy `Capture-Totp.ps1` and `Windows-Hil.ps1` to the Windows test VM. Start the
-capture script in the interactive desktop; its low-level keyboard hook records
-digit sequences even when its console is not focused:
+Copy `Capture-Totp.ps1` and `Windows-Hil.ps1` to the Windows test host or VM.
+Start the capture script in the interactive desktop; its low-level keyboard
+hook records digit sequences even when its console is not focused:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\Capture-Totp.ps1 `
   -LogPath C:\totp-hil\capture.jsonl
 ```
 
-`Windows-Hil.ps1` supports UB500 enable/disable, UTC-offset discovery, flushed
+`Windows-Hil.ps1` supports adapter enable/disable, UTC-offset discovery, flushed
 file writes, a recursive hidden-file/mtime inventory, and relevant System event
-collection. Run adapter state changes from an elevated PowerShell session.
+collection. Adapter commands default to a TP-Link UB500 (`2357:0604`); pass
+`-Vid` and `-ProductId` to select another adapter. Run adapter state changes
+from an elevated PowerShell session.
 
 ## Cycle records
 

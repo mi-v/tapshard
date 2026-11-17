@@ -90,10 +90,12 @@ period = 30
 enter = false
 ```
 
-Leave `timezone = 0` for the tested Linux setup. On Windows, set the host's local
-UTC offset, such as `+3` or `-5`. The
-[configuration example](config.ini.example) explains the settings and ranges.
-macOS behavior has not been validated.
+Set `timezone` to the UTC offset of the file timestamps written to the USB
+drive. On Linux, start with `timezone = 0`; FAT timestamp handling depends on
+mount settings. If your system writes local-time timestamps, use your current
+local UTC offset instead. On Windows, use your current local UTC offset, such
+as `+3` or `-5`. The [configuration example](config.ini.example) explains the
+settings and ranges.
 
 Save the file, allow about a second for timestamp synchronization, safely eject
 the drive if needed, and unplug USB to apply the configuration. To keep USB
@@ -162,15 +164,14 @@ calibration. The [UF2 guide](docs/UF2.md) covers reset behavior and recovery.
 
 ## Project status and security
 
-TapShard is a hobby project. Linux and Windows pairing, configuration and HID
-operation have been tested. Compatible boards with factory bootloaders 0.6.0
-and 0.9.2 / S140 6.1.1 have been used; see the
-[compatibility and validation limits](docs/UF2.md#compatibility).
+TapShard is a hobby project. Your host needs BLE HID keyboard support and USB
+Mass Storage support for configuration. Check the board and factory-bootloader
+[compatibility requirements](docs/UF2.md#compatibility) before installing.
 
 Configuration contains plaintext secrets while you edit it, so use a trusted
 host and pairing session. The protected build wipes RAM on reset and enables
-debug-port protection. Resistance to deliberate hardware fault injection has
-not been established.
+debug-port protection. These measures do not guarantee resistance to deliberate
+hardware fault injection.
 
 Only source code is provided at present. USB uses the shared Mass Storage ID
 `16c0:27df` under [Objective Development's sharing terms](https://github.com/obdev/v-usb/blob/master/usbdrv/USB-IDs-for-free.txt).

@@ -11,13 +11,14 @@
 # ---------------------------------------------------------------------------
 [device]
 
-# UTC offset of the machine that writes this file, in "UTC+N" notation.
+# UTC offset of the file timestamps written to the USB drive, in "UTC+N" notation.
 # The token anchors its clock to fresh file modification times on its USB drive
 # and applies this offset to get UTC for TOTP.
 #
-# The tested Linux setup uses UTC FAT times, so leave this at 0 there.
-# macOS behavior has not been validated. Windows writes local time; set this
-# to its UTC offset (e.g. +7, -5, +3:30; accepted range: -24..+24). (default: 0)
+# On Linux, start with 0; FAT timestamp handling depends on mount settings.
+# Use 0 for UTC timestamps, or your current local UTC offset for local-time
+# timestamps. On Windows, use your current local UTC offset (e.g. +7, -5,
+# +3:30; accepted range: -24..+24). (default: 0)
 timezone = 0
 
 # With two or more bonded hosts, the device emits a session-bound list like:
