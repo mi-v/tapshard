@@ -72,7 +72,7 @@ effective IDs.
 For a different authorized identity, supply both
 `-DCONFIG_TOTP_USB_VID=0xVVVV` and `-DCONFIG_TOTP_USB_PID=0xPPPP` alongside the
 configuration fragment. These settings do not allocate an ID. Builds using the
-old `1209:0001` private-test pair must not be redistributed.
+`1209:0001` private-test pair must not be redistributed.
 
 When changing USB IDs in an existing build, use a pristine build
 (`west build -p always ...`) or explicitly set both IDs. Existing build
@@ -123,6 +123,39 @@ This is a development image with demonstration accounts/time and button polling.
 Its layout is incompatible with UF2 installations. Do not flash its HEX over a
 board whose factory MBR/S140 stack must be preserved.
 
+## Firmware behavior reference
+
+### HID readiness
+
+`conn_settle_time` controls settling after the host subscribes to keyboard
+notifications. The fallback has a 500 ms minimum. HID metadata reads and explicit
+notification-enable writes restart settling; a keyboard LED output report can
+end it early. A pending readiness wait is bounded by the configured settling
+interval (at least 500 ms) plus 10 seconds. Ordinary host activity does not
+extend that deadline. See the [HIL guide](../tools/hil/README.md) for checks.
+
+### Clock synchronization and calibration
+
+The clock anchor is the newest modification time among new or changed regular
+files in the USB volume's root directory. It must be within
+2020-01-01..2100-01-01, newer than the session's previous anchor, and unchanged
+in two polls. The anchor uses the first poll's uptime so confirmation does not
+add a clock error. `timezone` converts the timestamp to UTC when generating a
+code. Fresh host timestamps and a correct host clock are required.
+
+Calibration compares raw uptime with elapsed host time across USB visits.
+There is no minimum waiting period: a new rounded integer correction is accepted
+only when it strictly improves both ends of a conservative +/-4-second elapsed
+time uncertainty interval. The limit is +/-500 ppm; implausible rates and
+apparent civil-time jumps restart the reference.
+
+The calibration reference stays fixed during a USB visit. On unplug, the latest
+accepted anchor becomes the next reference; a visit without an anchor retains
+the previous reference. A manual change to the current ppm value invalidates
+the reference and starts a new measurement window. References are RAM-only;
+the signed 32-bit `totp/drift` setting persists across normal resets and is
+cleared by factory recovery.
+
 ## Host tests
 
 ```sh
@@ -136,6 +169,31 @@ images expose their result as `selftest_failed` over SWD.
 `tools/run-limited.sh` defaults to 512 MiB of address space per process and a
 120-second wall-clock timeout. Builds use 1 GiB and two compile jobs. Its timeout
 terminates descendants as well as the initial process.
+
+## Release artifacts
+
+Firmware releases contain the protected `tapshard-VERSION.uf2`, `SHA256SUMS`,
+`BUILD_INFO.json`, `WEST_MANIFEST.yml` and `LICENSES.txt`. Download all five files
+to verify the package with `sha256sum -c SHA256SUMS`. Only the UF2 is copied to
+the board's factory bootloader drive.
+
+The build metadata identifies the source commit, tool versions, production
+settings and image hashes. The frozen west manifest records the exact Zephyr
+and module revisions used by the build; optional modules are omitted. ELF,
+linker maps and local hardware captures are not release assets. The UF2 contains
+flash data only, without the ELF's debugger sections or factory MBR/S140 images.
+
+To use the frozen dependencies, place `WEST_MANIFEST.yml` in the application
+source directory, named `tapshard`, before initializing a new workspace:
+
+```sh
+west init -l --mf WEST_MANIFEST.yml tapshard
+west update
+```
+
+Run these commands from the parent of `tapshard/`, using the source commit named
+in `BUILD_INFO.json`. Install dependencies and select the SDK as described above,
+then run the protected build command.
 
 ## SWD debugging
 

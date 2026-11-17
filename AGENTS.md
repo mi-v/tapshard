@@ -234,9 +234,11 @@ System OFF. SWD makes System OFF use debug emulation; measure without SWD.
 
 ## Clock invariants
 
-- Time anchor = newest sane mtime among files changed in the current USB
-  session, confirmed in two polls and applied at the first poll's uptime; the
-  dump's own mtime is 1980 and is part of the pre-enumeration baseline.
+- Time anchor = newest mtime among new/changed regular files in the root of the
+  current USB session's volume. Accept it only within 2020-01-01..2100-01-01
+  and newer than this session's accepted anchor, confirmed in two polls and
+  applied at the first poll's uptime. The dump's own mtime is 1980 and is part
+  of the pre-enumeration baseline.
 - Ppm calibration has no minimum waiting period. It compares host elapsed time
   with raw uptime and changes the rounded integer correction only when it is
   strictly better at both ends of a conservative +/-4 s elapsed-time uncertainty

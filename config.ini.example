@@ -1,17 +1,21 @@
 # TapShard configuration example.
 #
 # Copy this file to "config.ini" on the token's USB mass-storage volume.
-# Lines starting with '#' or ';' are comments. Keys are case-insensitive.
+# Lines starting with '#' or ';' are comments; both also start trailing comments.
+# Section names and keys are case-insensitive. Unknown sections or keys are errors.
 # Blank lines and surrounding whitespace are ignored.
 #
-# All settings are optional and fall back to sensible defaults.
+# Device settings are optional and fall back to defaults. Each account requires
+# a secret. Up to 16 accounts and files smaller than 8192 bytes are accepted.
 
 # ---------------------------------------------------------------------------
 # Device-wide settings (all optional).
 # ---------------------------------------------------------------------------
 [device]
 
-# UTC offset of the file timestamps written to the USB drive, in "UTC+N" notation.
+# UTC offset of the file timestamps written to the USB drive.
+# Use hours with an optional sign and :minutes, e.g. 0, +7, -5 or +3:30.
+# Do not include a "UTC" prefix.
 # The token anchors its clock to fresh file modification times on its USB drive
 # and applies this offset to get UTC for TOTP.
 #
@@ -35,35 +39,27 @@ timezone = 0
 # If host_id refers to a host being forgotten, its account edits are ignored
 # while the shared [device] settings still apply.
 #
-# With zero or one bond these keys are omitted. Before pairing, applied accounts
-# wait in an unassigned RAM profile ("limbo") for the first successfully paired
-# host. With one bond, accounts apply to that host's profile. A file generated
-# while unpaired still configures the first host paired during that USB session,
-# even if pairing happens before saving or another host pairs before applying.
-# Generated status comments describe when the file was created, not live state.
+# With zero or one bond these keys are omitted. Accounts configured before
+# pairing go to the first host you pair, even if you pair before saving the file.
+# With one bond, accounts apply to that host. Status comments update on the next
+# USB connection.
 # A real device reset clears every bond as well as RAM secrets.
 # Changing host_id requires replacing every keep:N with an explicit Base32
 # secret; placeholders may never copy secrets between host profiles.
 
-# How long to wait after the host subscribes before considering the HID link
-# "ready" to type. A value with no unit is milliseconds; "ms" and "s" suffixes
+# Delay to let the host prepare for typing. Increase this if the host misses
+# the beginning of a code. Bare values are milliseconds; "ms" and "s" suffixes
 # are also accepted. Accepted range: 0..60000ms. (default: 500ms)
-# The fallback wait has a 500ms minimum and restarts when the host reads HID
-# metadata or enables notifications. A keyboard LED report can end it sooner.
 conn_settle_time = 500ms
 
 # Delay between each key press/release while typing. Accepted range:
 # 1..5000ms. (default: 60ms)
 inter_key_time = 60ms
 
-# LFCLK drift calibration in parts-per-million (signed). Normally measured
-# automatically across recent USB visits when a new correction improves on the
-# current value throughout a conservative +/-4-second elapsed-time uncertainty
-# interval.
-# There is no fixed waiting period. Set this only to seed a known crystal error
-# or reset a bad calibration; editing it starts a new measurement window.
-# The next successful auto-calibration overwrites it. Accepted range: -500..+500.
-# (default: 0)
+# Clock drift correction in parts per million. Calibrated automatically;
+# normally leave this unchanged. You can set a known correction manually.
+# Positive values compensate for a fast clock; negative values for a slow clock.
+# Automatic calibration may replace it. Accepted range: -500..+500. (default: 0)
 drift_ppm = 0
 
 # How long the button must be held to enter pairing mode. Accepted range:
@@ -79,11 +75,8 @@ click_window_ms = 500
 # Accepted range: 0..300000ms. (default: 2000ms)
 grace_ms = 2000
 
-# Battery voltage (mV) below which the device considers the battery low and
-# gradually increases typing delays from 2x to 5x across each code as a charge
-# reminder, while USB is unplugged. The default assumes a LiPo cell
-# (~3.5V is "charge soon"); for two AA cells (~3.0V nominal) set a lower value,
-# e.g. 2200. The measured voltage is shown in the dump header as "# battery".
+# Battery voltage (mV) below which code typing slows down to indicate a low
+# battery while USB is unplugged. The default assumes a LiPo cell.
 # Accepted range: 1000..5500mV. (default: 3500)
 low_battery_mv = 3500
 
@@ -95,7 +88,7 @@ low_battery_mv = 3500
 [account]
 # Optional label (purely cosmetic; default "account1", "account2", ...).
 name = github
-# Base32 secret (RFC 4648; uppercase/lowercase and '-' separators are
+# Base32 secret (RFC 4648; uppercase/lowercase, spaces and '-' separators are
 # tolerated). REQUIRED — an account without a valid secret is a parse error,
 # reported by typing "000".
 #
@@ -122,26 +115,6 @@ period = 60
 enter = true
 
 # ---------------------------------------------------------------------------
-# Full example file:
-#
-#   [device]
-#   timezone = 0
-#   conn_settle_time = 600ms
-#   inter_key_time = 80ms
-#
-#   [account]
-#   name = github
-#   secret = JBSWY3DPEHPK3PXP
-#   digits = 6
-#   period = 30
-#
-#   [account]
-#   name = google
-#   secret = ABCDEFGHIJKLMNOP
-#   digits = 8
-#   period = 60
-#   enter = true
-#
 # Signals typed instead of a code:
 #   "0000" — no config.ini present / no accounts configured
 #   "000"  — config.ini present but failed to parse (reason in log.txt), OR

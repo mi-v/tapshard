@@ -15,7 +15,12 @@ Adafruit/nice!nano factory layout. The installer checks:
   start at `0x26000`.
 - Effective bootloader address `0xf4000` and MBR parameter page `0xfe000`, taking
   MBR settings into account before UICR.
-- Factory vectors and Adafruit-compatible GPREGRET `0x57` USB recovery behavior.
+- Factory stack and reset vectors, rejecting TapShard's own bootloader as a
+  factory-backup candidate.
+
+The factory bootloader must also support Adafruit-compatible GPREGRET `0x57`
+USB recovery. The installer cannot establish that behavior from vector checks;
+the existing MBR, S140 and factory bootloader are trusted firmware.
 
 Support is based on geometry and behavior, not a factory version allowlist.
 A factory version number alone does not establish compatibility. A different
@@ -29,7 +34,8 @@ match the button and external-regulator wiring in
    [build guide](BUILDING.md#build-normal-protected-firmware).
 2. Connect the board's native USB. Enter its factory bootloader using the
    board's own gesture, commonly a double press of Reset.
-3. Confirm the **NICENANO** drive and copy the application `zephyr.uf2` to it.
+3. Find the factory bootloader drive, commonly named **NICENANO**, and copy the
+   application `zephyr.uf2` to it.
 4. Allow the automatic restarts to complete. The factory drive disappears;
    normal operation presents **TapShard Config** with `config.ini`.
 5. [Pair and configure the token](../README.md#get-started).
@@ -37,8 +43,8 @@ match the button and external-regulator wiring in
 Before accepting secrets, the application captures the complete factory
 bootloader with its SHA-256 and installs the independent wiping bootloader
 through Nordic MBR COPY_BL. It verifies the active image and backup, writes
-persistent APPROTECT in protected builds, then restarts to confirm the stored
-protection setting. Only the normal configuration path permits provisioning.
+persistent APPROTECT in protected builds, then restarts if that setting needed
+to change. Only the normal configuration path permits provisioning.
 
 Installation enables debug-port protection. Reopening SWD requires explicit
 CTRL-AP ERASEALL and restoration of the factory stack; that operation erases

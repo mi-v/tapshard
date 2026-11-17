@@ -7,19 +7,34 @@ follows FIPS 180-4. Register addresses and the minimal MBR/S140 SVC ABI are
 independently declared in `bootloader/boot.h`, `bootloader/boot.c`, and
 `bootloader/svc.S`.
 
-The Zephyr application depends on Zephyr and its west modules, including Nordic
-HAL/CMSIS, FatFs, and PSA crypto. Their own licenses and notices remain in force;
-the project's MIT license does not replace them. Reproduce the workspace's
-west manifest when preparing a release and include the notices for the actual
-linked dependency versions.
+The Zephyr application depends on the following upstream components. Their own
+licenses and notices remain in force; the project's MIT license does not replace
+them. The [collected notices](THIRD_PARTY_NOTICES.txt) accompany binary releases
+as `LICENSES.txt`.
+
+| Component | License |
+|---|---|
+| Zephyr | Apache-2.0, with per-file notices |
+| CMSIS and CMSIS 6 | Apache-2.0 |
+| Nordic nrfx / MDK | BSD-3-Clause |
+| Nordic Zephyr integration | LicenseRef-Nordic-5-Clause |
+| FatFs | ChaN's permissive license |
+| Mbed TLS and TF-PSA-Crypto | Apache-2.0, selected from the upstream dual-license option |
+| Picolibc / Newlib runtime | Per-file licenses in the upstream copyright catalogs |
+| GCC support routines | GPL-3.0 with GCC Runtime Library Exception 3.1 |
+
+Each release includes `WEST_MANIFEST.yml` with exact dependency revisions and
+`BUILD_INFO.json` with the source commit, tool versions, production settings and
+firmware hashes. The notice collection includes upstream license catalogs;
+listing a catalog does not mean every file it describes is linked into the UF2.
 
 The independent bootloader currently pins Zephyr SDK 1.0.1's ARM GCC 14.3.0.
-Compiler support routines, if linked, retain the toolchain's licensing and GCC
-Runtime Library Exception. The application uses Zephyr's configured C runtime.
+Compiler support routines retain the toolchain's licensing and GCC Runtime
+Library Exception. The protected application uses the SDK's Picolibc runtime.
 
-Bench recovery uses the separately downloaded official Adafruit nice!nano 0.9.2
-HEX containing Nordic S140 6.1.1. It is verified by SHA-256 in
-`tools/uf2/prepare_recovery.py`. That download, its board-specific recovery HEX,
+The offline recovery helper `tools/uf2/prepare_recovery.py` accepts a separately
+downloaded official Adafruit nice!nano 0.9.2 HEX containing Nordic S140 6.1.1 and
+checks its pinned SHA-256. That download, its board-specific recovery HEX,
 and flash backups are ignored bench artifacts; they are not part of the
 application UF2 or this repository. On-device recovery captures the board's
 factory bootloader locally. No MBR/S140/factory firmware is distributed inside

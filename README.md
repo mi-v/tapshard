@@ -45,17 +45,19 @@ are nRF GPIO names, which may differ from the labels printed on the board.
 The firmware disables the external VCC regulator controlled by P0.13, so the
 VCC/EXTVCC header is unpowered during normal operation.
 
-Idle current depends on the board and attached components. One battery setup
-measured about 4 µA, including roughly 2 µA of external capacitor leakage.
+Idle current depends on the board and attached components. For measurements,
+disconnect USB and SWD and use the [measurement build](docs/BUILDING.md#development-variants).
 
 ## Get started
 
-### 1. Build and install
+### 1. Install firmware
 
-Follow the [build guide](docs/BUILDING.md) to set up Zephyr and build the protected
-UF2 image. Put a compatible factory board into its USB bootloader mode, then
-copy `zephyr.uf2` to the **NICENANO** drive. The device restarts and appears as
-**TapShard Config**. See [installation and recovery](docs/UF2.md) for details.
+Download the protected UF2 from [Releases](https://github.com/mi-v/tapshard/releases),
+or follow the [build guide](docs/BUILDING.md) to build it yourself. Put a compatible
+factory board into its USB bootloader mode, then copy the UF2 to its bootloader
+drive, commonly named **NICENANO**. The device restarts and appears as
+**TapShard Config**. See
+[installation and recovery](docs/UF2.md) for details.
 
 The protected image replaces the active bootloader while saving a recovery copy
 on the device, and locks the debug port. Restoring debug access requires a full
@@ -64,7 +66,8 @@ chip erase. Use the separate bench image when developing over SWD.
 ### 2. Pair a host
 
 1. Turn on Bluetooth on your computer or phone.
-2. Hold the button for about **three seconds**, until the LED flashes.
+2. Hold the button for about **three seconds**, until the steady LED turns off
+   and begins a slow blink.
 3. Select **TapShard TOTP token** in the host's Bluetooth settings. The default
    pairing window is 30 seconds.
 
@@ -106,24 +109,17 @@ The device creates a new configuration dump on every USB connection. Existing
 secrets appear as `secret = keep:N`; preserve those references when editing or
 reordering accounts. They are valid only for the dump that contains them.
 
-You can configure accounts before pairing. Applied accounts wait in an
-unassigned RAM profile called **limbo**. The first successfully paired host
-receives those accounts, and limbo is cleared. Later hosts have separate account
-profiles; device-wide settings remain shared.
-
-Pairing while the USB drive is connected does not rewrite `config.ini`. If you
-pair before saving and applying an unpaired configuration file, it still
-configures the first host paired during that USB session, even if another host
-pairs later. Generated status comments, such as `bonded = no`, describe when
-the file was created and refresh on the next USB connection.
+You can configure accounts before pairing. They go to the first host you pair,
+even if you pair before saving the file. Each host has its own accounts;
+device settings are shared. Status comments update on the next USB connection.
 
 ### 4. Type a code
 
 Focus the host's code-entry field, then click once for the first account, twice
 for the second, and so on. TapShard reconnects, types the code and disconnects
-again. It prefers the last-used host before allowing another paired host to
-connect. If several hosts are nearby, their Bluetooth availability determines
-which one can receive the code.
+again. It gives the most recently connected host a five-second preference
+window before allowing another paired host to connect. If several hosts are
+nearby, their Bluetooth availability determines which one can receive the code.
 
 Each host has a separate account profile. With multiple pairings, the generated
 configuration includes `host_id` and bond references for selecting a profile or
@@ -131,26 +127,20 @@ forgetting a host; see [the annotated example](config.ini.example).
 
 ## Clock and battery
 
-Saving a file on the configuration drive provides a fresh clock timestamp. USB
-power alone does not synchronize the clock. Between visits, a low-frequency
-crystal keeps time while the CPU sleeps.
+Saving `config.ini` synchronizes the clock; drift correction is automatic.
+USB power alone does not synchronize it. After a reset, save the file again to
+set the clock. The learned drift correction survives reset; factory recovery
+clears it.
 
-TapShard learns a ppm correction when the elapsed-time measurement is precise
-enough to improve the current value. It uses recent USB visits so older
-conditions do not dominate indefinitely. You can also edit `drift_ppm` in the
-configuration. Reset loses the clock reference but preserves the saved ppm;
-factory recovery clears it along with the other settings.
-
-On low battery, typing gradually slows from 2× to 5× its normal delay across a
-code. Charge the battery to restore normal speed. The threshold and typing
-speed are configurable; the dump header includes the measured battery voltage.
+When battery voltage is low, code typing slows down to indicate it. Adjust the
+threshold with `low_battery_mv`.
 
 ## Troubleshooting
 
 | Symptom | What to check |
 |---|---|
 | Types `0000` | No accounts are configured for the connected host. |
-| Types `000` | Configuration could not be parsed, or the selected secret is invalid. Check `log.txt` on the next USB connection. |
+| Types `000` | Configuration could not be parsed or applied, or the selected account has `secret = error`. After unplugging, check `log.txt` on the next USB connection for configuration errors. |
 | No text appears | Check pairing, Bluetooth availability, input focus and the selected account number. Save a file on USB to synchronize an unset clock. |
 | Codes are rejected | Check the service's secret, period, digit count and the host's clock/timezone setting. |
 | Only `log.txt` appears after installation | The bootloader verification gate reported an error; see [recovery](docs/UF2.md#installation-errors). |
@@ -158,7 +148,7 @@ speed are configurable; the dump header includes the measured battery voltage.
 ## Firmware updates
 
 Connect USB and press Reset **three times quickly**, with less than 750 ms
-between presses. When the factory bootloader drive appears, copy the new UF2.
+between releases. When the factory bootloader drive appears, copy the new UF2.
 Then pair and configure again. Updates clear accounts, pairings and saved clock
 calibration. The [UF2 guide](docs/UF2.md) covers reset behavior and recovery.
 
@@ -173,17 +163,11 @@ host and pairing session. The protected build wipes RAM on reset and enables
 debug-port protection. These measures do not guarantee resistance to deliberate
 hardware fault injection.
 
-Only source code is provided at present. USB uses the shared Mass Storage ID
-`16c0:27df` under [Objective Development's sharing terms](https://github.com/obdev/v-usb/blob/master/usbdrv/USB-IDs-for-free.txt).
-Each board has a stable serial of the form
-`mivlad@gmail.com:tapshard-<16 uppercase hex digits>`, derived from its hardware
-ID. Software identifying TapShard must check this serial prefix as well as the
-shared VID/PID. Normal use relies on the operating system's mass-storage driver.
-
-USB diagnostic tools may show the shared VID owner's name, **Van Ooijen
-Technische Informatica**. The USB product string is **Mass storage configuration
-interface for TapShard**; the configuration drive is displayed as **TapShard
-Config**.
+TapShard uses a shared USB ID, so USB diagnostic tools may show
+**Van Ooijen Technische Informatica** as its vendor.
+The configuration drive is **TapShard Config**. See the
+[build guide](docs/BUILDING.md#build-normal-protected-firmware) for USB identity
+details and sharing terms.
 
 ## Building and contributing
 

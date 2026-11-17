@@ -1242,11 +1242,9 @@ static size_t config_dump_text(void)
 
 	if (bonds == 0) {
 		dump_append(&pos, "# No host was paired when this file was generated.\n");
-		dump_append(&pos, "# Accounts applied before pairing wait in an unassigned RAM profile (\"limbo\").\n");
-		dump_append(&pos, "# The first successfully paired host receives those accounts.\n");
-		dump_append(&pos, "# Pairing before saving is also supported: this USB session's file still\n");
-		dump_append(&pos, "# configures that first host when applied, even if another host pairs later.\n");
-		dump_append(&pos, "# Apply saved changes by unplugging USB or clicking while still plugged in.\n\n");
+		dump_append(&pos, "# Accounts in this file go to the first host you pair.\n");
+		dump_append(&pos, "# You can pair before saving; this file still configures that first host.\n");
+		dump_append(&pos, "# Save, then unplug USB or click while plugged in to apply.\n\n");
 	}
 
 	if (profile->have_config && profile->slot_count > 0) {
