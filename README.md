@@ -6,6 +6,8 @@ and press its button when you need a code. No companion app is needed.
 
 It runs upstream Zephyr on an nRF52840 Pro Micro / SuperMini-style board.
 
+Ready-to-flash firmware: [v0.1.0](https://github.com/mi-v/tapshard/releases/tag/v0.1.0).
+
 ## Features
 
 - HMAC-SHA1 TOTP with configurable code length, period and optional Enter.
@@ -52,7 +54,7 @@ disconnect USB and SWD and use the [measurement build](docs/BUILDING.md#developm
 
 ### 1. Install firmware
 
-Download the protected UF2 from [Releases](https://github.com/mi-v/tapshard/releases),
+Download the protected [tapshard-v0.1.0.uf2](https://github.com/mi-v/tapshard/releases/download/v0.1.0/tapshard-v0.1.0.uf2),
 or follow the [build guide](docs/BUILDING.md) to build it yourself. Put a compatible
 factory board into its USB bootloader mode, then copy the UF2 to its bootloader
 drive, commonly named **NICENANO**. The device restarts and appears as
