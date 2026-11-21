@@ -86,7 +86,8 @@ static const struct hids_info info = {
 
 static volatile int cccd_notify; /* 1 = central subscribed to notifications */
 static void (*subscribed_cb)(void);
-static void (*host_setup_cb)(void);
+static void (*host_setup_cb)(struct bt_conn *conn);
+static bool (*authorized_cb)(struct bt_conn *conn);
 
 /* Debug: last CCC value written (inspected via SWD). */
 volatile int dbg_ccc_notify;
@@ -117,6 +118,7 @@ enum send_phase {
 /* A single notification is ever in flight. The completion callback advances
  * this sequencer, so no sleeps or report bursts run on the system workqueue. */
 static struct {
+	struct bt_conn *conn;
 	uint8_t usages[KBD_SEND_MAX_KEYS];
 	size_t count;
 	size_t digits;
@@ -147,18 +149,18 @@ static ssize_t input_ccc_write(struct bt_conn *conn,
 			       const struct bt_gatt_attr *attr, uint16_t value);
 static void sender_work_handler(struct k_work *work);
 
-static void host_setup_activity(void)
+static void host_setup_activity(struct bt_conn *conn)
 {
 	dbg_hid_setup++;
 	if (host_setup_cb) {
-		host_setup_cb();
+		host_setup_cb(conn);
 	}
 }
 
 static ssize_t read_protocol_mode(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 				  void *buf, uint16_t len, uint16_t offset)
 {
-	host_setup_activity();
+	host_setup_activity(conn);
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, &protocol_mode,
 				 sizeof(protocol_mode));
 }
@@ -166,17 +168,17 @@ static ssize_t read_protocol_mode(struct bt_conn *conn, const struct bt_gatt_att
 static ssize_t read_report_ref(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			       void *buf, uint16_t len, uint16_t offset)
 {
-	host_setup_activity();
+	host_setup_activity(conn);
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, input_ref,
 				 sizeof(input_ref));
 }
 
-static void (*output_write_cb)(void);
+static void (*output_write_cb)(struct bt_conn *conn);
 
 static ssize_t read_output_ref(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			       void *buf, uint16_t len, uint16_t offset)
 {
-	host_setup_activity();
+	host_setup_activity(conn);
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, output_ref,
 				 sizeof(output_ref));
 }
@@ -201,12 +203,12 @@ static ssize_t write_output_report(struct bt_conn *conn, const struct bt_gatt_at
 	/* The host writes the LED report once its HID stack is up: treat this
 	 * as the "host ready" signal. */
 	if (output_write_cb) {
-		output_write_cb();
+		output_write_cb(conn);
 	}
 	return len;
 }
 
-void kbd_set_output_write_cb(void (*cb)(void))
+void kbd_set_output_write_cb(void (*cb)(struct bt_conn *conn))
 {
 	output_write_cb = cb;
 }
@@ -258,7 +260,7 @@ BT_GATT_SERVICE_DEFINE(hog_svc,
 static ssize_t read_info(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			 void *buf, uint16_t len, uint16_t offset)
 {
-	host_setup_activity();
+	host_setup_activity(conn);
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, &info,
 				 sizeof(info));
 }
@@ -266,7 +268,7 @@ static ssize_t read_info(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 static ssize_t read_report_map(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			       void *buf, uint16_t len, uint16_t offset)
 {
-	host_setup_activity();
+	host_setup_activity(conn);
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, report_map,
 				 sizeof(report_map));
 }
@@ -274,6 +276,9 @@ static ssize_t read_report_map(struct bt_conn *conn, const struct bt_gatt_attr *
 static ssize_t read_input_report(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 				 void *buf, uint16_t len, uint16_t offset)
 {
+	if (!authorized_cb || !authorized_cb(conn)) {
+		return BT_GATT_ERR(BT_ATT_ERR_AUTHORIZATION);
+	}
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, report_value,
 				 sizeof(report_value));
 }
@@ -296,7 +301,7 @@ static ssize_t input_ccc_write(struct bt_conn *conn,
 	/* Restoring a bonded CCC is not a new host write. Observe explicit
 	 * writes even when they leave the restored value unchanged. */
 	if (value & BT_GATT_CCC_NOTIFY) {
-		host_setup_activity();
+		host_setup_activity(conn);
 	}
 	return sizeof(value);
 }
@@ -309,9 +314,15 @@ void kbd_init(void)
 	k_work_init_delayable(&sender.work, sender_work_handler);
 }
 
-bool kbd_is_subscribed(void)
+bool kbd_is_subscribed(struct bt_conn *conn)
 {
-	return cccd_notify != 0;
+	return conn && bt_gatt_is_subscribed(conn, &hog_svc.attrs[6],
+					 BT_GATT_CCC_NOTIFY);
+}
+
+void kbd_set_authorized_cb(bool (*cb)(struct bt_conn *conn))
+{
+	authorized_cb = cb;
 }
 
 void kbd_set_subscribed_cb(void (*cb)(void))
@@ -319,7 +330,7 @@ void kbd_set_subscribed_cb(void (*cb)(void))
 	subscribed_cb = cb;
 }
 
-void kbd_set_host_setup_cb(void (*cb)(void))
+void kbd_set_host_setup_cb(void (*cb)(struct bt_conn *conn))
 {
 	host_setup_cb = cb;
 }
@@ -350,6 +361,9 @@ static int char_to_usage(char c)
 
 static void sender_clear(void)
 {
+	struct bt_conn *conn = sender.conn;
+
+	sender.conn = NULL;
 	secure_zero(sender.usages, sizeof(sender.usages));
 	sender.count = 0;
 	sender.digits = 0;
@@ -362,6 +376,9 @@ static void sender_clear(void)
 	sender.in_flight = false;
 	sender.done_cb = NULL;
 	secure_zero(report_value, sizeof(report_value));
+	if (conn) {
+		bt_conn_unref(conn);
+	}
 }
 
 static void sender_finish(int err)
@@ -498,6 +515,10 @@ static void sender_work_handler(struct k_work *work)
 	if (!sender.active) {
 		return;
 	}
+	if (!authorized_cb || !authorized_cb(sender.conn)) {
+		sender_finish(-EACCES);
+		return;
+	}
 	if (sender.in_flight) {
 		/* Zephyr deliberately omits the completion callback when its ATT
 		 * transmit metadata reports an error. Disconnect to release any key
@@ -509,7 +530,7 @@ static void sender_work_handler(struct k_work *work)
 		sender_finish(0);
 		return;
 	}
-	if (!cccd_notify) {
+	if (!kbd_is_subscribed(sender.conn)) {
 		sender_finish(-ENOTCONN);
 		return;
 	}
@@ -535,10 +556,10 @@ static void sender_work_handler(struct k_work *work)
 		if (dbg_force_notify_after > 0) {
 			dbg_force_notify_after--;
 		}
-		err = bt_gatt_notify_cb(NULL, &params);
+		err = bt_gatt_notify_cb(sender.conn, &params);
 	}
 #else
-	err = bt_gatt_notify_cb(NULL, &params);
+	err = bt_gatt_notify_cb(sender.conn, &params);
 #endif
 	if (err != 0) {
 		sender_send_failed(err);
@@ -550,7 +571,7 @@ static void sender_work_handler(struct k_work *work)
 	}
 }
 
-int kbd_send_code(const char *digits, bool enter, uint32_t inter_key_ms,
+int kbd_send_code(struct bt_conn *conn, const char *digits, bool enter, uint32_t inter_key_ms,
 		   bool slow, kbd_send_done_cb_t done_cb)
 {
 	size_t count = 0;
@@ -559,7 +580,10 @@ int kbd_send_code(const char *digits, bool enter, uint32_t inter_key_ms,
 	if (sender.active) {
 		return -EBUSY;
 	}
-	if (!cccd_notify) {
+	if (!conn || !authorized_cb || !authorized_cb(conn)) {
+		return -EACCES;
+	}
+	if (!kbd_is_subscribed(conn)) {
 		return -ENOTCONN;
 	}
 	for (p = digits; *p; p++) {
@@ -587,6 +611,7 @@ int kbd_send_code(const char *digits, bool enter, uint32_t inter_key_ms,
 		return -EINVAL;
 	}
 
+	sender.conn = bt_conn_ref(conn);
 	sender.count = count;
 	sender.digits = count - (enter ? 1u : 0u);
 	sender.index = 0;

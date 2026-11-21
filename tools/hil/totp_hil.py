@@ -21,6 +21,10 @@ from pathlib import Path
 
 DEFAULT_SYMBOLS = (
     "selftest_failed",
+    "dbg_startup_stage",
+    "dbg_peer_authorized",
+    "dbg_peer_rejected",
+    "dbg_pairing_rejected",
     "dbg_state",
     "dbg_idle_reason",
     "dbg_connected",

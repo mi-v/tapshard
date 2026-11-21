@@ -72,6 +72,9 @@ captures when cleaning the tracked source tree.
 
 Firmware boot tests cover configuration, TOTP, time, FAT snapshots, profiles,
 HID pacing and application integration. Their result is `selftest_failed`.
+Crypto/self-test, authentication registration, settings load, boot bond cleanup
+or profile reconciliation failure blocks normal operation. USB then exposes
+diagnostic `log.txt` only; button actions and configuration apply stay disabled.
 Host tests run with `python -m unittest discover -s tools/uf2 -v`; use the limit
 wrapper. Exercise changed behavior without repeating unrelated hardware tests.
 
@@ -184,7 +187,20 @@ System OFF. SWD makes System OFF use debug emulation; measure without SWD.
   at normal duration and put the extra delay after release to avoid host
   auto-repeat. The sender and TOTP expiry budget share the same timing
   calculation. Each send captures its pacing for the entire code.
-- SMP is Just Works (`BT_SMP_ENFORCE_MITM=n`) + `ALLOW_UNAUTH_OVERWRITE=y`.
+- SMP is Just Works (`BT_SMP_ENFORCE_MITM=n`) with bonding required.
+  `BT_SMP_APP_PAIRING_ACCEPT=y` gates fresh pairing and key replacement to a
+  connection admitted during the current button-opened pairing window.
+  `ALLOW_UNAUTH_OVERWRITE=y` permits deliberate re-pairing inside that gate.
+  Late/rejected completions discard their new bond; failed cleanup blocks
+  normal operation until reset.
+- Per-connection authorization requires current successful L2+ security, a real
+  bond and the matching RAM profile. Preferred profile selection and HID
+  readiness never grant authorization. Revoke it on security failure, teardown,
+  pairing entry and active bond deletion. Queued security events retain their
+  connection and generation to reject stale callbacks.
+- HID report reads and every notification require connection authorization.
+  Subscription checks and sends use the explicit connection; the sender owns a
+  reference until completion/cancellation and never broadcasts secret reports.
 - Raised `CONFIG_BT_BUF_ACL_TX_COUNT`/`ATT_TX_COUNT`/etc. for the HID report burst.
 - FatFs: `CONFIG_FS_FATFS_HAS_RTC=y` with `get_fattime()` returning **1980-01-01**
   (below `TIME_SANE_MIN`) so device-written files never become a clock anchor;

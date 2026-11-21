@@ -27,6 +27,7 @@
  */
 
 #include <stdio.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <string.h>
 #include <time.h>
@@ -63,7 +64,7 @@
 #define DEVICE_NAME_LEN (sizeof(DEVICE_NAME) - 1)
 
 /* Firmware version, shown in the dumped config.ini header. */
-#define FW_VERSION "0.1.0"
+#define FW_VERSION "0.1.1"
 
 /* --- Timing --- */
 #if IS_ENABLED(CONFIG_TOTP_DEBUG)
@@ -129,12 +130,51 @@ enum idle_reason {
 	IDLE_SEND_FAILED = 10,
 	IDLE_CONFIG_UNSTABLE = 11,
 	IDLE_HID_READY_TIMEOUT = 12,
+	IDLE_UNAUTHORIZED = 13,
 };
 
 static enum app_state state = STATE_IDLE;
 volatile int dbg_state = STATE_IDLE;
 
 static struct bt_conn *cur_conn;
+static struct k_spinlock peer_lock;
+static uint32_t peer_generation;
+static bool peer_authorized;
+static bool peer_rejected;
+static bt_addr_le_t peer_identity;
+static bool pairing_window_open;
+static uint32_t pairing_window_generation;
+static uint32_t peer_pairing_window;
+static bool peer_pairing_admitted;
+static bool peer_pairing_handled;
+static atomic_t startup_ready;
+
+enum peer_event_kind {
+	PEER_SECURITY,
+	PEER_PAIRED,
+};
+
+struct peer_event {
+	struct bt_conn *conn;
+	uint32_t generation;
+	uint32_t pairing_window;
+	enum peer_event_kind kind;
+	bt_security_t level;
+	enum bt_security_err err;
+	bool bonded;
+	bool admitted;
+};
+
+K_MSGQ_DEFINE(peer_events, sizeof(struct peer_event), 8, 4);
+static struct k_work peer_work;
+static struct bt_conn *peer_cleanup_conn;
+volatile int dbg_peer_authorized;
+volatile int dbg_peer_rejected;
+volatile int dbg_pairing_rejected;
+volatile int dbg_startup_stage;
+#if IS_ENABLED(CONFIG_TOTP_TEST_POLL)
+volatile int dbg_force_startup_failure;
+#endif
 
 /* Device-wide settings are independent from per-bond secret profiles. */
 static struct totp_device device_settings;
@@ -267,6 +307,9 @@ static void led_wait_window(bool settle, uint32_t duration_ms);
 static void led_button_feedback(bool active);
 static void led_attempt_reset(void);
 static void led_send_finished(void);
+static void startup_fail(const char *message);
+static void on_subscribed(void);
+static void usb_vbus_cb(bool present);
 
 static const uint16_t appearance = CONFIG_BT_DEVICE_APPEARANCE;
 
@@ -282,10 +325,130 @@ static void set_state(enum app_state s)
 	printk("state -> %d\n", (int)s);
 }
 
-/* True when the host can receive reports: subscribed and settled. */
+/* The preferred profile is not proof that this connection owns its secrets. */
+static struct bt_conn *connection_get(void)
+{
+	k_spinlock_key_t key = k_spin_lock(&peer_lock);
+	struct bt_conn *conn = cur_conn ? bt_conn_ref(cur_conn) : NULL;
+
+	k_spin_unlock(&peer_lock, key);
+	return conn;
+}
+
+static bool connection_matches(struct bt_conn *conn, uint32_t generation)
+{
+	k_spinlock_key_t key = k_spin_lock(&peer_lock);
+	bool matches = conn && conn == cur_conn && generation == peer_generation;
+
+	k_spin_unlock(&peer_lock, key);
+	return matches;
+}
+
+static void peer_revoke(bool reject)
+{
+	k_spinlock_key_t key = k_spin_lock(&peer_lock);
+
+	peer_authorized = false;
+	dbg_peer_authorized = 0;
+	peer_rejected |= reject;
+	k_spin_unlock(&peer_lock, key);
+}
+
+static bool peer_is_authorized(struct bt_conn *conn)
+{
+	bt_addr_le_t identity;
+	bt_addr_le_t selected;
+	const bt_addr_le_t *actual;
+	uint32_t generation;
+	k_spinlock_key_t key = k_spin_lock(&peer_lock);
+	bool valid = conn && conn == cur_conn && peer_authorized &&
+		     !peer_rejected && !pairing_window_open && atomic_get(&startup_ready);
+
+	generation = peer_generation;
+	bt_addr_le_copy(&identity, &peer_identity);
+	k_spin_unlock(&peer_lock, key);
+	if (!valid || bt_conn_get_security(conn) < BT_SECURITY_L2) {
+		return false;
+	}
+	actual = bt_conn_get_dst(conn);
+	if (!actual || !bt_addr_le_eq(actual, &identity) ||
+	    !profiles_is_bonded(&identity) ||
+	    !profiles_current_addr(&selected) || !bt_addr_le_eq(&selected, &identity)) {
+		return false;
+	}
+	key = k_spin_lock(&peer_lock);
+	valid = conn == cur_conn && generation == peer_generation &&
+		peer_authorized && !peer_rejected && !pairing_window_open &&
+		atomic_get(&startup_ready);
+	k_spin_unlock(&peer_lock, key);
+	return valid;
+}
+
+static bool authorize_peer(struct bt_conn *conn, uint32_t generation)
+{
+	const bt_addr_le_t *peer = bt_conn_get_dst(conn);
+	k_spinlock_key_t key;
+	bool allowed;
+
+	key = k_spin_lock(&peer_lock);
+	allowed = conn && conn == cur_conn && generation == peer_generation &&
+		  !peer_rejected && !pairing_window_open && atomic_get(&startup_ready);
+	k_spin_unlock(&peer_lock, key);
+	if (!allowed || !peer ||
+	    bt_conn_get_security(conn) < BT_SECURITY_L2 ||
+	    !profiles_is_bonded(peer) || !profiles_find(peer) ||
+	    profiles_set_current(peer) != 0) {
+		return false;
+	}
+	key = k_spin_lock(&peer_lock);
+	allowed = conn == cur_conn && generation == peer_generation &&
+		  !peer_rejected && !pairing_window_open && atomic_get(&startup_ready);
+	if (allowed) {
+		bt_addr_le_copy(&peer_identity, peer);
+		peer_authorized = true;
+		dbg_peer_authorized = 1;
+	}
+	k_spin_unlock(&peer_lock, key);
+	return allowed && peer_is_authorized(conn);
+}
+
+static void pairing_window_set(bool open)
+{
+	k_spinlock_key_t key = k_spin_lock(&peer_lock);
+
+	pairing_window_generation++;
+	pairing_window_open = open;
+	peer_authorized = false;
+	dbg_peer_authorized = 0;
+	if (open) {
+		/* An existing connection predates this user-authorized window. */
+		peer_rejected = cur_conn != NULL;
+		peer_pairing_window = 0;
+	}
+	k_spin_unlock(&peer_lock, key);
+}
+
+static bool startup_inject(int stage)
+{
+#if IS_ENABLED(CONFIG_TOTP_TEST_POLL)
+	return dbg_force_startup_failure == stage;
+#else
+	ARG_UNUSED(stage);
+	return false;
+#endif
+}
+
+/* Authorization, subscription and host readiness are independent requirements. */
 static bool link_ready(void)
 {
-	return kbd_is_subscribed() && link_settled;
+	struct bt_conn *conn = connection_get();
+	bool ready = conn && peer_is_authorized(conn) &&
+		     kbd_is_subscribed(conn) && link_settled;
+
+	if (conn) {
+		bt_conn_unref(conn);
+	}
+	return ready;
 }
 
 static uint32_t hid_ready_budget_ms(void)
@@ -655,6 +818,9 @@ static void advertise(bool discoverable, bool prefer_host)
 /* Stop advertising and return to sleep, disconnecting if still linked. */
 static void go_idle(enum idle_reason reason)
 {
+	struct bt_conn *conn;
+
+	peer_revoke(true);
 	dbg_idle_reason = reason;
 	pending_clear();
 	kbd_cancel_send();
@@ -677,9 +843,11 @@ static void go_idle(enum idle_reason reason)
 	preferred_advertising = false;
 	atomic_clear(&adv_restart_pending);
 	set_state(STATE_IDLE);
-	if (cur_conn) {
+	conn = connection_get();
+	if (conn) {
 		atomic_set(&connection_releasing, 1);
-		bt_conn_disconnect(cur_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		bt_conn_unref(conn);
 	}
 	printk("-> IDLE (sleeping)\n");
 }
@@ -687,6 +855,7 @@ static void go_idle(enum idle_reason reason)
 /* Common teardown when leaving pairing mode (success, cancel or timeout). */
 static void stop_pairing_ui(void)
 {
+	pairing_window_set(false);
 	button_set_pairing(false);
 	k_work_cancel_delayable(&pairing_timeout_work);
 	led_attempt_reset();
@@ -694,6 +863,9 @@ static void stop_pairing_ui(void)
 
 static void enter_pairing(void)
 {
+	struct bt_conn *conn;
+
+	pairing_window_set(true);
 	pending_clear();
 	kbd_cancel_send();
 	link_settled = false;
@@ -716,8 +888,10 @@ static void enter_pairing(void)
 
 	/* Existing bonds remain valid. If one snatches this discoverable
 	 * advertisement it is disconnected below and pairing resumes. */
-	if (cur_conn) {
-		bt_conn_disconnect(cur_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+	conn = connection_get();
+	if (conn) {
+		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		bt_conn_unref(conn);
 	} else {
 		atomic_set(&adv_restart_pending, 1);
 		if (!atomic_get(&connection_releasing)) {
@@ -750,35 +924,54 @@ static void bt_ready(int err)
 {
 	bt_ready_called = 1;
 	if (err) {
-		printk("Bluetooth init failed (err %d)\n", err);
-		if (usb_msc_init() != 0) {
-			printk("USB MSC init failed\n");
-		}
+		dbg_startup_stage = -4;
+		startup_fail("Bluetooth initialization failed. No secrets accepted.\n");
 		return;
 	}
 	printk("Bluetooth initialized\n");
 
 	if (IS_ENABLED(CONFIG_SETTINGS)) {
-		settings_load();
+		if (startup_inject(4) || settings_load() != 0) {
+			dbg_startup_stage = -5;
+			startup_fail("Settings load failed. No secrets accepted.\n");
+			return;
+		}
 	}
 	/* Secrets and usage metadata do not survive a real firmware boot. Do not
 	 * retain flash-backed trust records with no corresponding RAM profile. */
-	err = bt_unpair(BT_ID_DEFAULT, NULL);
+	err = startup_inject(5) ? -EIO : bt_unpair(BT_ID_DEFAULT, NULL);
 	if (err != 0) {
-		printk("Boot bond cleanup failed (err %d)\n", err);
+		dbg_startup_stage = -6;
+		startup_fail("Boot bond cleanup failed. No secrets accepted.\n");
+		return;
 	}
-	if (profiles_sync_bonds() != 0) {
-		printk("Bond/profile sync failed\n");
+	if (startup_inject(6) || profiles_sync_bonds() != 0) {
+		dbg_startup_stage = -7;
+		startup_fail("Bond/profile reconciliation failed. No secrets accepted.\n");
+		return;
 	}
+#if IS_ENABLED(CONFIG_TOTP_BATTERY_MONITOR)
+	battery_init();
+	battery_set_low_threshold(device_settings.low_battery_mv);
+#endif
+	atomic_set(&startup_ready, 1);
+	usb_msc_set_vbus_cb(usb_vbus_cb);
 	if (usb_msc_init() != 0) {
-		printk("USB MSC init failed\n");
+		dbg_startup_stage = -8;
+		startup_fail("USB initialization failed. No secrets accepted.\n");
+		return;
 	}
+	button_init();
+	button_set_timings(device_settings.click_window_ms, device_settings.long_press_ms);
+	dbg_startup_stage = 5;
 
 	/* Stay in IDLE (radio off) until the button is pressed. */
 }
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
+	k_spinlock_key_t key;
+
 	if (err) {
 		printk("Connection failed (err 0x%02x)\n", err);
 		if (state == STATE_CONNECTING) {
@@ -791,7 +984,16 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	k_work_cancel_delayable(&preferred_fallback_work);
 	preferred_advertising = false;
 	atomic_clear(&adv_restart_pending);
+	key = k_spin_lock(&peer_lock);
 	cur_conn = bt_conn_ref(conn);
+	peer_generation++;
+	peer_authorized = false;
+	peer_rejected = false;
+	dbg_peer_authorized = 0;
+	peer_pairing_admitted = false;
+	peer_pairing_handled = false;
+	peer_pairing_window = pairing_window_open ? pairing_window_generation : 0;
+	k_spin_unlock(&peer_lock, key);
 
 	{
 		struct bt_conn_info info;
@@ -818,14 +1020,25 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
+	struct bt_conn *released;
+	k_spinlock_key_t key = k_spin_lock(&peer_lock);
+
+	if (conn != cur_conn) {
+		k_spin_unlock(&peer_lock, key);
+		return;
+	}
+	released = cur_conn;
+	cur_conn = NULL;
+	peer_generation++;
+	peer_authorized = false;
+	peer_rejected = true;
+	dbg_peer_authorized = 0;
+	k_spin_unlock(&peer_lock, key);
 	dbg_disconnect_reason = reason;
 	printk("Disconnected (reason 0x%02x)\n", reason);
 
 	atomic_set(&connection_releasing, 1);
-	if (cur_conn) {
-		bt_conn_unref(cur_conn);
-		cur_conn = NULL;
-	}
+	bt_conn_unref(released);
 
 	/* The link is gone: any readiness is void. */
 	link_settled = false;
@@ -847,7 +1060,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 static void adv_work_handler(struct k_work *work)
 {
-	if (!atomic_get(&connection_releasing) && !cur_conn &&
+	if (atomic_get(&startup_ready) && !atomic_get(&connection_releasing) && !cur_conn &&
 	    (state == STATE_PAIRING || state == STATE_CONNECTING)) {
 		atomic_clear(&adv_restart_pending);
 		advertise(state == STATE_PAIRING, state == STATE_CONNECTING);
@@ -892,82 +1105,249 @@ static void preferred_fallback_handler(struct k_work *work)
 	advertise(false, false);
 }
 
+static enum bt_security_err pairing_accept(struct bt_conn *conn,
+				const struct bt_conn_pairing_feat *feat)
+{
+	k_spinlock_key_t key = k_spin_lock(&peer_lock);
+	bool accept = atomic_get(&startup_ready) && conn && conn == cur_conn &&
+		      pairing_window_open && !peer_rejected &&
+		      peer_pairing_window == pairing_window_generation;
+
+	ARG_UNUSED(feat);
+	if (accept) {
+		peer_pairing_admitted = true;
+	} else {
+		dbg_pairing_rejected++;
+	}
+	k_spin_unlock(&peer_lock, key);
+	return accept ? BT_SECURITY_ERR_SUCCESS : BT_SECURITY_ERR_PAIR_NOT_ALLOWED;
+}
+
+static void peer_event_submit(struct bt_conn *conn, enum peer_event_kind kind,
+			      bt_security_t level, enum bt_security_err err, bool bonded)
+{
+	struct peer_event event = {
+		.kind = kind, .level = level, .err = err, .bonded = bonded,
+	};
+	k_spinlock_key_t key = k_spin_lock(&peer_lock);
+
+	if (!conn || conn != cur_conn) {
+		k_spin_unlock(&peer_lock, key);
+		return;
+	}
+	event.conn = bt_conn_ref(conn);
+	event.generation = peer_generation;
+	event.pairing_window = peer_pairing_window;
+	event.admitted = peer_pairing_admitted;
+	if ((kind == PEER_SECURITY && (err || level < BT_SECURITY_L2)) ||
+	    (kind == PEER_PAIRED && (!bonded || !event.admitted ||
+	     !pairing_window_open || event.pairing_window != pairing_window_generation))) {
+		peer_rejected = true;
+		peer_authorized = false;
+		dbg_peer_authorized = 0;
+	}
+	k_spin_unlock(&peer_lock, key);
+	/* Retaining the event connection prevents recycling before a rejected
+	 * pairing's new keys can be removed, even after disconnection. */
+	if (k_msgq_put(&peer_events, &event, K_NO_WAIT) != 0) {
+		peer_revoke(true);
+		key = k_spin_lock(&peer_lock);
+		if (kind == PEER_PAIRED && bonded && !peer_cleanup_conn) {
+			peer_cleanup_conn = event.conn;
+			event.conn = NULL;
+		}
+		k_spin_unlock(&peer_lock, key);
+		if (event.conn) {
+			bt_conn_unref(event.conn);
+		}
+	}
+	k_work_submit(&peer_work);
+}
+
+static void reject_peer(struct bt_conn *conn)
+{
+	struct bt_conn *current = connection_get();
+
+	if (current == conn) {
+		peer_revoke(true);
+		dbg_peer_rejected++;
+		if (state == STATE_PAIRING) {
+			kbd_cancel_send();
+			bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+		} else {
+			go_idle(IDLE_UNAUTHORIZED);
+		}
+	}
+	if (current) {
+		bt_conn_unref(current);
+	}
+}
+
+static void discard_completed_bond(const bt_addr_le_t *peer)
+{
+	if (bt_unpair(BT_ID_DEFAULT, peer) != 0) {
+		/* A failed cleanup must not leave newly distributed keys trusted on
+		 * the next connection, including a replacement of an old host bond. */
+		profiles_remove(peer);
+		go_idle(IDLE_UNAUTHORIZED);
+		startup_fail("Bond cleanup failed. Reset before configuring again.\n");
+	}
+}
+
+static void peer_work_handler(struct k_work *work)
+{
+	struct peer_event event;
+	struct bt_conn *conn;
+	k_spinlock_key_t key;
+	bool rejected;
+
+	ARG_UNUSED(work);
+	while (k_msgq_get(&peer_events, &event, K_NO_WAIT) == 0) {
+		const bt_addr_le_t *peer = bt_conn_get_dst(event.conn);
+		bool current = connection_matches(event.conn, event.generation);
+		bool valid_pairing;
+		bool admitted;
+		bool handled;
+
+		key = k_spin_lock(&peer_lock);
+		rejected = peer_rejected;
+		admitted = peer_pairing_admitted;
+		handled = current && peer_pairing_handled;
+		valid_pairing = current && !rejected && atomic_get(&startup_ready) &&
+			pairing_window_open && event.admitted &&
+			event.pairing_window == pairing_window_generation;
+		if (event.kind == PEER_PAIRED && current && !handled) {
+			peer_pairing_handled = true;
+		}
+		k_spin_unlock(&peer_lock, key);
+
+		if (event.kind == PEER_PAIRED) {
+			bool follows_limbo = dump_profile_valid &&
+				bt_addr_le_eq(&dump_profile.addr, BT_ADDR_LE_ANY);
+
+			if (handled) {
+				goto next_event;
+			}
+			if (!valid_pairing || !event.bonded || !peer ||
+			    bt_conn_get_security(event.conn) < BT_SECURITY_L2 ||
+			    !profiles_is_bonded(peer) || profiles_attach_limbo(peer) != 0) {
+				/* A late completion must not establish trust for a later
+				 * reconnect. Never delete an old bond merely for a rejected
+				 * pairing request: only a completed new pairing reaches here. */
+				if (event.bonded && peer) {
+					discard_completed_bond(peer);
+				}
+				reject_peer(event.conn);
+				goto next_event;
+			}
+			if (follows_limbo) {
+				bt_addr_le_copy(&dump_profile.addr, peer);
+			}
+			k_work_cancel_delayable(&pairing_finish_work);
+			finish_pairing();
+			if (!authorize_peer(event.conn, event.generation)) {
+				discard_completed_bond(peer);
+				reject_peer(event.conn);
+				goto next_event;
+			}
+			k_work_reschedule(&pairing_disconnect_work, K_MSEC(PAIR_DISCONNECT_MS));
+		} else if (current) {
+			if (rejected || event.err || event.level < BT_SECURITY_L2) {
+				reject_peer(event.conn);
+			} else if (state == STATE_PAIRING) {
+				/* Genuine pairing waits for key distribution to finish.
+				 * A known-host reconnect still follows the snatch path. */
+				if (!admitted) {
+					if (peer && profiles_is_bonded(peer) && profiles_find(peer)) {
+						k_work_reschedule(&pairing_finish_work, K_MSEC(PAIR_SNATCH_MS));
+					} else {
+						reject_peer(event.conn);
+					}
+				}
+			} else if (!authorize_peer(event.conn, event.generation)) {
+				reject_peer(event.conn);
+			} else {
+				try_send();
+			}
+		}
+next_event:
+		bt_conn_unref(event.conn);
+	}
+	key = k_spin_lock(&peer_lock);
+	conn = peer_cleanup_conn;
+	peer_cleanup_conn = NULL;
+	k_spin_unlock(&peer_lock, key);
+	if (conn) {
+		const bt_addr_le_t *peer = bt_conn_get_dst(conn);
+
+		if (peer) {
+			discard_completed_bond(peer);
+		}
+		reject_peer(conn);
+		bt_conn_unref(conn);
+	}
+	/* Queue overflow also revokes authorization and disconnects, even when
+	 * its particular event could not be retained. */
+	conn = connection_get();
+	key = k_spin_lock(&peer_lock);
+	rejected = peer_rejected;
+	k_spin_unlock(&peer_lock, key);
+	if (conn) {
+		if (rejected) {
+			reject_peer(conn);
+		}
+		bt_conn_unref(conn);
+	}
+}
+
 static void security_changed(struct bt_conn *conn, bt_security_t level,
 			     enum bt_security_err err)
 {
-	const bt_addr_le_t *peer = bt_conn_get_dst(conn);
-	bool known_bond = level >= BT_SECURITY_L2 && peer &&
-			  profiles_is_bonded(peer);
-
 	dbg_sec_changed_err = err;
 	dbg_sec_level = level;
 	dbg_enc_key_size = bt_conn_enc_key_size(conn);
-
-	if (err) {
-		printk("Pairing failed (err %d)\n", err);
-		return;
-	}
-	printk("Pairing success (level %u)\n", level);
-
-	/* Defer a known-host snatch so a genuine re-pair's pairing_complete can
-	 * cancel it. Never let a snatch change the preferred/current profile. */
-	if (state == STATE_PAIRING && known_bond) {
-		k_work_reschedule(&pairing_finish_work, K_MSEC(PAIR_SNATCH_MS));
-	} else if (state != STATE_PAIRING && known_bond) {
-		if (!profiles_find(peer)) {
-			profiles_add(peer);
-		}
-		profiles_set_current(peer);
-	}
+	peer_event_submit(conn, PEER_SECURITY, level, err, false);
 }
 
 static void pairing_finish_work_handler(struct k_work *work)
 {
-	if (state == STATE_PAIRING) {
-		/* A bonded host reconnected ("snatch"). Stay discoverable after its
-		 * disconnect callback re-submits advertising. */
-		if (cur_conn) {
-			bt_conn_disconnect(cur_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-		}
-		printk("Snatched; continuing pairing\n");
+	struct bt_conn *conn = connection_get();
+	k_spinlock_key_t key = k_spin_lock(&peer_lock);
+	bool admitted = peer_pairing_admitted;
+
+	k_spin_unlock(&peer_lock, key);
+
+	if (state == STATE_PAIRING && conn && !admitted) {
+		bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+	}
+	if (conn) {
+		bt_conn_unref(conn);
 	}
 }
 
-/* Fired only on a genuine pairing (bond distributed), not a bonded reconnect. */
+/* Pairing completion is distinct from encryption with a restored bond. */
 static void pairing_complete(struct bt_conn *conn, bool bonded)
 {
-	const bt_addr_le_t *peer = bt_conn_get_dst(conn);
-	bool dump_follows_limbo = dump_profile_valid &&
-				 bt_addr_le_eq(&dump_profile.addr, BT_ADDR_LE_ANY);
-	int err;
-
 	dbg_pairing_count++;
 	dbg_pairing_bonded = bonded;
-	printk("Pairing complete (bonded %d)\n", bonded);
-
-	if (bonded && state == STATE_PAIRING) {
-		k_work_cancel_delayable(&pairing_finish_work);
-		err = peer ? profiles_attach_limbo(peer) : -EINVAL;
-		if (err != 0) {
-			printk("Profile attach failed (err %d)\n", err);
-		} else if (dump_follows_limbo) {
-			/* keep:N in a pre-pairing USB dump follows the limbo contents
-			 * when that same profile is attached to its first bond. */
-			bt_addr_le_copy(&dump_profile.addr, peer);
-		}
-		finish_pairing();
-		printk("Paired; profile selected\n");
-
-		/* Brief grace so the host's pairing UI registers "paired", then
-		 * disconnect and sleep. Typing happens on a later button press,
-		 * which reconnects via the bond. */
-		k_work_reschedule(&pairing_disconnect_work, K_MSEC(PAIR_DISCONNECT_MS));
-	}
+	peer_event_submit(conn, PEER_PAIRED, bt_conn_get_security(conn),
+			  BT_SECURITY_ERR_SUCCESS, bonded);
 }
 
 static void bond_deleted(uint8_t id, const bt_addr_le_t *peer)
 {
+	struct bt_conn *conn = connection_get();
+
 	ARG_UNUSED(id);
+	if (conn) {
+		const bt_addr_le_t *actual = bt_conn_get_dst(conn);
+
+		if (actual && bt_addr_le_eq(actual, peer)) {
+			peer_revoke(true);
+			k_work_submit(&peer_work);
+		}
+		bt_conn_unref(conn);
+	}
 	if (dump_profile_valid && bt_addr_le_eq(&dump_profile.addr, peer)) {
 		clear_dump_secrets();
 	}
@@ -986,6 +1366,10 @@ static struct bt_conn_auth_info_cb auth_info_cb = {
 	.bond_deleted = bond_deleted,
 };
 
+static const struct bt_conn_auth_cb auth_cb = {
+	.pairing_accept = pairing_accept,
+};
+
 BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,
@@ -1001,6 +1385,7 @@ static bool dump_overflow;
 
 BUILD_ASSERT(CONFIG_BT_MAX_PAIRED == CONFIG_TOTP_MAX_BONDS,
 	     "config bond references must match the Bluetooth bond pool");
+BUILD_ASSERT(CONFIG_BT_MAX_CONN == 1, "Peer lifecycle requires one connection");
 
 /* Append a formatted line to the dump buffer. */
 static void dump_append(size_t *pos, const char *fmt, ...)
@@ -1680,6 +2065,9 @@ static void config_retry_handler(struct k_work *work)
  * already contains it. */
 static void usb_vbus_cb(bool present)
 {
+	if (!atomic_get(&startup_ready)) {
+		return;
+	}
 	usb_vbus_present = present;
 
 #if IS_ENABLED(CONFIG_TOTP_BATTERY_MONITOR)
@@ -1881,12 +2269,19 @@ static void send_complete(int err)
  * the non-blocking sender; the code buffer can be cleared immediately. */
 static bool type_now(void)
 {
+	struct bt_conn *conn = connection_get();
 	struct secret_profile *profile = profiles_current();
 	char code[16];
 	bool enter = false;
 	int err;
 	int slot_idx = -1;
 
+	if (!conn || !peer_is_authorized(conn)) {
+		if (conn) {
+			bt_conn_unref(conn);
+		}
+		return false;
+	}
 	sending_clear();
 
 	switch (pending.kind) {
@@ -1900,6 +2295,7 @@ static bool type_now(void)
 		if (pending.slot_idx < 0 ||
 		    pending.slot_idx >= profile->slot_count ||
 		    !generate_code(pending.slot_idx, code, sizeof(code))) {
+			bt_conn_unref(conn);
 			return false;
 		}
 		enter = profile->slots[pending.slot_idx].enter;
@@ -1907,6 +2303,7 @@ static bool type_now(void)
 		break;
 	case PENDING_NONE:
 	default:
+		bt_conn_unref(conn);
 		return false;
 	}
 
@@ -1923,8 +2320,9 @@ static bool type_now(void)
 	}
 	pending_clear();
 
-	err = kbd_send_code(code, enter, device_settings.inter_key_ms,
+	err = kbd_send_code(conn, code, enter, device_settings.inter_key_ms,
 			    slow_typing(), send_complete);
+	bt_conn_unref(conn);
 	secure_zero(code, sizeof(code));
 	if (err != 0) {
 		sending_clear();
@@ -2050,9 +2448,15 @@ static void on_subscribed(void)
 /* A bonded CCC may be restored before the host installs its notification
  * handler. Extend the settle window while it reads HID metadata or explicitly
  * enables notifications, including a write of the already-restored value. */
-static void on_host_setup(void)
+static void on_host_setup(struct bt_conn *conn)
 {
-	if (!cur_conn || (state != STATE_CONNECTED && state != STATE_GRACE)) {
+	struct bt_conn *current = connection_get();
+	bool matches = current && current == conn;
+
+	if (current) {
+		bt_conn_unref(current);
+	}
+	if (!matches || (state != STATE_CONNECTED && state != STATE_GRACE)) {
 		return;
 	}
 	atomic_inc(&settle_generation);
@@ -2064,8 +2468,17 @@ static void on_host_setup(void)
 
 /* Called (ATT RX context) when the host writes the output (LED) report: the
  * host's HID stack is up, so skip the rest of the settle. */
-static void on_output_write(void)
+static void on_output_write(struct bt_conn *conn)
 {
+	struct bt_conn *current = connection_get();
+	bool matches = current && current == conn;
+
+	if (current) {
+		bt_conn_unref(current);
+	}
+	if (!matches) {
+		return;
+	}
 	atomic_inc(&settle_generation);
 	link_settled = false;
 	k_work_reschedule(&settle_work, K_NO_WAIT);
@@ -2401,6 +2814,9 @@ static void start_connecting(void)
 
 void button_pressed(void)
 {
+	if (!atomic_get(&startup_ready)) {
+		return;
+	}
 	/* Retain steady feedback through the click-count window. Pairing and
 	 * an active transmission take priority in the LED worker. */
 	led_button_feedback(true);
@@ -2419,6 +2835,9 @@ void button_pressed(void)
 
 void button_clicked(int count)
 {
+	if (!atomic_get(&startup_ready)) {
+		return;
+	}
 	if (state == STATE_PAIRING) {
 		/* Cancel pairing; no code. */
 		cancel_pairing();
@@ -2465,7 +2884,7 @@ void button_clicked(int count)
 
 void button_long_pressed(void)
 {
-	if (state != STATE_PAIRING) {
+	if (atomic_get(&startup_ready) && state != STATE_PAIRING) {
 		enter_pairing();
 	}
 }
@@ -2494,7 +2913,6 @@ static FUNC_NORETURN void power_diagnostic(void)
 }
 #endif
 
-#if IS_ENABLED(CONFIG_TOTP_SECURITY_BOOTLOADER)
 static const char *boot_error;
 
 static void boot_error_vbus(bool present)
@@ -2503,7 +2921,20 @@ static void boot_error_vbus(bool present)
 		config_fs_log(boot_error);
 	}
 }
-#endif
+
+static void startup_fail(const char *message)
+{
+	atomic_clear(&startup_ready);
+	peer_revoke(true);
+	if (boot_error) {
+		return;
+	}
+	boot_error = message;
+	/* This callback never dumps or applies config.ini. A broken filesystem
+	 * may also prevent diagnostics, but must not enable normal operation. */
+	usb_msc_set_vbus_cb(boot_error_vbus);
+	usb_msc_init();
+}
 
 int main(void)
 {
@@ -2511,11 +2942,11 @@ int main(void)
 
 	printk("TOTP token starting\n");
 #if IS_ENABLED(CONFIG_TOTP_SECURITY_BOOTLOADER)
-	boot_error = boot_security_init();
-	if (boot_error) {
-		/* Diagnostic-only MSC: no button, BLE, config parser, or secrets. */
-		usb_msc_set_vbus_cb(boot_error_vbus);
-		usb_msc_init();
+	const char *security_error = boot_security_init();
+
+	if (security_error) {
+		dbg_startup_stage = -1;
+		startup_fail(security_error);
 		for (;;) {
 			k_sleep(K_FOREVER);
 		}
@@ -2529,18 +2960,11 @@ int main(void)
 	profiles_init();
 
 	led_init();
-	button_init();
 	kbd_init();
-	button_set_timings(device_settings.click_window_ms,
-			   device_settings.long_press_ms);
-#if IS_ENABLED(CONFIG_TOTP_BATTERY_MONITOR)
-	battery_init();
-	battery_set_low_threshold(device_settings.low_battery_mv);
-#endif
+	kbd_set_authorized_cb(peer_is_authorized);
 	kbd_set_subscribed_cb(on_subscribed);
 	kbd_set_host_setup_cb(on_host_setup);
 	kbd_set_output_write_cb(on_output_write);
-	bt_conn_auth_info_cb_register(&auth_info_cb);
 
 	k_work_init_delayable(&connect_timeout_work, connect_timeout_handler);
 	k_work_init_delayable(&preferred_fallback_work,
@@ -2556,9 +2980,10 @@ int main(void)
 	k_work_init_delayable(&pairing_disconnect_work, pairing_disconnect_handler);
 	k_work_init_delayable(&pairing_finish_work, pairing_finish_work_handler);
 	k_work_init_delayable(&totp_wait_work, totp_wait_handler);
-	usb_msc_set_vbus_cb(usb_vbus_cb);
+	k_work_init(&peer_work, peer_work_handler);
+	dbg_startup_stage = 1;
 
-	if (totp_init() != 0) {
+	if (startup_inject(1) || totp_init() != 0) {
 		printk("Crypto init failed\n");
 		selftest_failed = 1;
 	} else {
@@ -2568,6 +2993,22 @@ int main(void)
 				  led_selftest() || hid_ready_selftest() || app_selftest();
 		printk("TOTP selftest %s\n", selftest_failed ? "FAILED" : "ok");
 	}
+	if (startup_inject(2)) {
+		selftest_failed = 1;
+	}
+	if (selftest_failed) {
+		dbg_startup_stage = -2;
+		startup_fail("Mandatory startup checks failed. No secrets accepted.\n");
+		goto sleep;
+	}
+	dbg_startup_stage = 2;
+	if (startup_inject(3) || bt_conn_auth_cb_register(&auth_cb) != 0 ||
+	    bt_conn_auth_info_cb_register(&auth_info_cb) != 0) {
+		dbg_startup_stage = -3;
+		startup_fail("Authentication callback registration failed. No secrets accepted.\n");
+		goto sleep;
+	}
+	dbg_startup_stage = 3;
 
 	/* Hardcoded test config so no USB is needed for testing. */
 #if IS_ENABLED(CONFIG_TOTP_DEBUG)
@@ -2578,11 +3019,12 @@ int main(void)
 	led_live = true;
 	err = bt_enable(bt_ready);
 	if (err) {
-		printk("Bluetooth init failed (err %d)\n", err);
-		return 0;
+		dbg_startup_stage = -4;
+		startup_fail("Bluetooth initialization failed. No secrets accepted.\n");
 	}
 
 	/* The device is event-driven: sleep until the button interrupt. */
+sleep:
 	while (1) {
 		k_sleep(K_FOREVER);
 	}

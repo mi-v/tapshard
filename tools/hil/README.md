@@ -32,6 +32,32 @@ sh tools/run-limited.sh --memory-mib 1024 --seconds 240 \
 Both variants must report `selftest_failed = 0` after boot. Restore the normal
 image before platform and soak testing.
 
+## Authorization and startup checks
+
+Use public test accounts and a dedicated Bluetooth adapter. Pair in a
+button-opened window, configure an account, and verify the captured code against
+an independent TOTP calculation. Repeat after cycling the adapter and around
+automatic disconnection.
+
+To check key-replacement rejection, remove the host's bond only, preserving the
+token's bond and account. During an ordinary button reconnect, request fresh
+pairing from that same adapter. It must fail, produce no keyboard input and
+retain the token's existing bond/profile. An explicit long press must still
+allow deliberate re-pairing and preserve that profile's accounts.
+
+`dbg_peer_authorized` reports connection authorization; `dbg_peer_rejected` and
+`dbg_pairing_rejected` count rejected peers and pairing requests. HID readiness
+alone must never authorize a connection. Host tests exercise unknown encrypted
+peers, stale callbacks, late pairing completion, cleanup failure and sender
+revocation without assuming those scenarios are radio exploits.
+
+Unlocked `TOTP_TEST_POLL` builds expose `dbg_force_startup_failure`. Halt at
+`main`, set it to 1..6, then resume to force crypto, self-test, authentication
+registration, settings load, boot bond cleanup or profile reconciliation
+failure. Expect a negative `dbg_startup_stage`, no normal button operation or
+advertising, and diagnostic-only USB with `log.txt`. A healthy boot reaches
+stage 5 with `selftest_failed = 0`. Production omits this injection hook.
+
 ## SWD and OTP helpers
 
 SWD commands use pyOCD's Python API so a complete gesture stays in one debugger

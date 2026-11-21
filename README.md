@@ -6,7 +6,7 @@ and press its button when you need a code. No companion app is needed.
 
 It runs upstream Zephyr on an nRF52840 Pro Micro / SuperMini-style board.
 
-Ready-to-flash firmware: [v0.1.0](https://github.com/mi-v/tapshard/releases/tag/v0.1.0).
+Ready-to-flash firmware: [v0.1.1](https://github.com/mi-v/tapshard/releases/tag/v0.1.1).
 
 ## Features
 
@@ -54,7 +54,7 @@ disconnect USB and SWD and use the [measurement build](docs/BUILDING.md#developm
 
 ### 1. Install firmware
 
-Download the protected [tapshard-v0.1.0.uf2](https://github.com/mi-v/tapshard/releases/download/v0.1.0/tapshard-v0.1.0.uf2),
+Download the protected [tapshard-v0.1.1.uf2](https://github.com/mi-v/tapshard/releases/download/v0.1.1/tapshard-v0.1.1.uf2),
 or follow the [build guide](docs/BUILDING.md) to build it yourself. Put a compatible
 factory board into its USB bootloader mode, then copy the UF2 to its bootloader
 drive, commonly named **NICENANO**. The device restarts and appears as
@@ -145,7 +145,7 @@ threshold with `low_battery_mv`.
 | Types `000` | Configuration could not be parsed or applied, or the selected account has `secret = error`. After unplugging, check `log.txt` on the next USB connection for configuration errors. |
 | No text appears | Check pairing, Bluetooth availability, input focus and the selected account number. Save a file on USB to synchronize an unset clock. |
 | Codes are rejected | Check the service's secret, period, digit count and the host's clock/timezone setting. |
-| Only `log.txt` appears after installation | The bootloader verification gate reported an error; see [recovery](docs/UF2.md#installation-errors). |
+| Only `log.txt` appears | A mandatory startup check failed. Read the log; for installation errors, see [recovery](docs/UF2.md#installation-errors). |
 
 ## Firmware updates
 
@@ -161,7 +161,11 @@ Mass Storage support for configuration. Check the board and factory-bootloader
 [compatibility requirements](docs/UF2.md#compatibility) before installing.
 
 Configuration contains plaintext secrets while you edit it, so use a trusted
-host and pairing session. The protected build wipes RAM on reset and enables
+host and pairing session. Bluetooth uses Just Works pairing, which does not
+protect against an active intermediary during pairing. New pairing is accepted
+only during the button-opened pairing window; typing requires an encrypted
+connection to a paired host with its matching account profile.
+The protected build wipes RAM on reset and enables
 debug-port protection. These measures do not guarantee resistance to deliberate
 hardware fault injection.
 

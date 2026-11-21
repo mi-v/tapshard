@@ -163,8 +163,10 @@ sh tools/run-limited.sh python -m unittest discover -s tools/uf2 -v
 ```
 
 These tests cover UF2 boundaries, factory backup validation, SHA-256, command
-limits and host tool discovery. Firmware self-tests also run at boot; developer
-images expose their result as `selftest_failed` over SWD.
+limits, host tool discovery and the actual application authorization and HID
+sender functions with a mock transport. Firmware self-tests also run at boot;
+failure blocks normal operation and exposes a USB diagnostic log. Developer
+images expose the result as `selftest_failed` over SWD.
 
 `tools/run-limited.sh` defaults to 512 MiB of address space per process and a
 120-second wall-clock timeout. Builds use 1 GiB and two compile jobs. Its timeout

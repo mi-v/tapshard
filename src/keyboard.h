@@ -7,11 +7,16 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+struct bt_conn;
+
 /* Initialize the HID service and prepare the input report. */
 void kbd_init(void);
 
-/* True if a central has subscribed to notifications on the input report. */
-bool kbd_is_subscribed(void);
+/* Subscription belongs to this connection, not to a cached CCC value. */
+bool kbd_is_subscribed(struct bt_conn *conn);
+
+/* Deny report reads and sends unless the application authorizes this peer. */
+void kbd_set_authorized_cb(bool (*cb)(struct bt_conn *conn));
 
 /* Register a callback invoked (ATT RX context) when a central subscribes
  * to notifications. Subscription alone does not prove host input readiness. */
@@ -19,11 +24,11 @@ void kbd_set_subscribed_cb(void (*cb)(void));
 
 /* HID metadata reads and explicit notification-enable writes indicate that
  * the host is still preparing its HID input path. Invoked in ATT RX context. */
-void kbd_set_host_setup_cb(void (*cb)(void));
+void kbd_set_host_setup_cb(void (*cb)(struct bt_conn *conn));
 
 /* Register a callback invoked when the host writes the output (LED) report.
  * Used as the "host HID stack is up" signal to start typing sooner. */
-void kbd_set_output_write_cb(void (*cb)(void));
+void kbd_set_output_write_cb(void (*cb)(struct bt_conn *conn));
 
 /* Completion for one asynchronous code send. @err is zero on success and a
  * negative errno if reports could not be delivered. */
@@ -34,7 +39,7 @@ typedef void (*kbd_send_done_cb_t)(int err);
  * progress; this function never sleeps. With @slow, character cadence ramps
  * from 2x to 5x delay using longer gaps after release; key holds stay normal
  * to avoid auto-repeat. Optional Enter keeps the final cadence. */
-int kbd_send_code(const char *digits, bool enter, uint32_t inter_key_ms,
+int kbd_send_code(struct bt_conn *conn, const char *digits, bool enter, uint32_t inter_key_ms,
 		   bool slow, kbd_send_done_cb_t done_cb);
 
 /* Scheduled duration, including warm-up and the final release delay. Uses the
